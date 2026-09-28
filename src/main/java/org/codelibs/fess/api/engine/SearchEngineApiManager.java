@@ -1,0 +1,313 @@
+/*
+ * Copyright 2012-2025 CodeLibs Project and the Others.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND,
+ * either express or implied. See the License for the specific language
+ * governing permissions and limitations under the License.
+ */
+package org.codelibs.fess.api.engine;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.Locale;
+import java.util.Map;
+import java.util.UUID;
+import java.util.regex.Pattern;
+
+import org.apache.catalina.connector.ClientAbortException;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+import org.codelibs.core.io.CopyUtil;
+import org.codelibs.core.lang.StringUtil;
+import org.codelibs.curl.Curl.Method;
+import org.codelibs.curl.CurlRequest;
+import org.codelibs.curl.CurlResponse;
+import org.codelibs.fess.Constants;
+import org.codelibs.fess.api.BaseApiManager;
+import org.codelibs.fess.exception.FessSystemException;
+import org.codelibs.fess.exception.WebApiException;
+import org.codelibs.fess.mylasta.action.FessUserBean;
+import org.codelibs.fess.util.ComponentUtil;
+import org.codelibs.fess.util.ResourceUtil;
+import org.lastaflute.web.servlet.request.RequestManager;
+import org.lastaflute.web.servlet.session.SessionManager;
+
+import jakarta.annotation.PostConstruct;
+import jakarta.servlet.FilterChain;
+import jakarta.servlet.ServletException;
+import jakarta.servlet.ServletInputStream;
+import jakarta.servlet.ServletOutputStream;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+
+/**
+ * API manager for search engine administrative operations.
+ * Provides secure access to search engine APIs through authentication and token-based authorization.
+ */
+public class SearchEngineApiManager extends BaseApiManager {
+    private static final String ADMIN_SERVER = "/admin/server_";
+
+    private static final Logger logger = LogManager.getLogger(SearchEngineApiManager.class);
+
+    private static final Pattern DOTS = Pattern.compile("\\.\\.+");
+
+    private static final Pattern MULTIPLE_SLASHES = Pattern.compile("/+");
+
+    private static final Map<String, String> EXTENSION_CONTENT_TYPES = Map.ofEntries(Map.entry(".html", "text/html;charset=utf-8"),
+            Map.entry(".css", "text/css"), Map.entry(".eot", "application/vnd.ms-fontobject"),
+            Map.entry(".ico", "image/vnd.microsoft.icon"), Map.entry(".js", "text/javascript"), Map.entry(".json", "application/json"),
+            Map.entry(".otf", "font/otf"), Map.entry(".svg", "image/svg+xml"), Map.entry(".ttf", "font/ttf"),
+            Map.entry(".txt", "text/plain"), Map.entry(".woff", "font/woff"), Map.entry(".woff2", "font/woff2"));
+
+    /** Roles that are allowed to access the search engine API */
+    protected String[] acceptedRoles = { "admin" };
+
+    /**
+     * Default constructor.
+     * Initializes the API manager with the admin server path prefix.
+     */
+    public SearchEngineApiManager() {
+        setPathPrefix(ADMIN_SERVER);
+    }
+
+    /**
+     * Registers this API manager with the web API manager factory.
+     * Called automatically after construction via @PostConstruct.
+     */
+    @PostConstruct
+    public void register() {
+        if (logger.isInfoEnabled()) {
+            logger.info("Loaded {}", this.getClass().getSimpleName());
+        }
+        ComponentUtil.getWebApiManagerFactory().add(this);
+    }
+
+    @Override
+    public boolean matches(final HttpServletRequest request) {
+        final String servletPath = request.getServletPath();
+        return servletPath.startsWith(pathPrefix);
+    }
+
+    @Override
+    public void process(final HttpServletRequest request, final HttpServletResponse response, final FilterChain chain)
+            throws IOException, ServletException {
+        final RequestManager requestManager = ComponentUtil.getRequestManager();
+        if (!requestManager.findUserBean(FessUserBean.class).map(user -> user.hasRoles(acceptedRoles)).orElse(Boolean.FALSE)) {
+            response.sendError(HttpServletResponse.SC_UNAUTHORIZED, "Unauthorized access: " + request.getServletPath());
+            return;
+        }
+
+        try {
+            getSessionManager().getAttribute(Constants.SEARCH_ENGINE_API_ACCESS_TOKEN, String.class).ifPresent(token -> {
+                final String servletPath = request.getServletPath();
+                final String pathPrefix = ADMIN_SERVER + token;
+                if (!servletPath.startsWith(pathPrefix)) {
+                    throw new WebApiException(HttpServletResponse.SC_FORBIDDEN, "Invalid access token.");
+                }
+                final String path;
+                final String value = servletPath.substring(pathPrefix.length());
+                if (!value.startsWith("/")) {
+                    path = "/" + value;
+                } else {
+                    path = value;
+                }
+                processRequest(request, response, path);
+            }).orElse(() -> {
+                throw new WebApiException(HttpServletResponse.SC_FORBIDDEN, "Invalid session.");
+            });
+        } catch (final WebApiException e) {
+            final int statusCode = e.getStatusCode();
+            String message;
+            if (Constants.TRUE.equalsIgnoreCase(ComponentUtil.getFessConfig().getApiJsonResponseExceptionIncluded())) {
+                if (statusCode >= 400 && statusCode < 500) {
+                    if (logger.isDebugEnabled()) {
+                        logger.debug("Failed to access Web API.", e);
+                    }
+                } else {
+                    logger.warn("Failed to access Web API.", e);
+                }
+                message = e.getMessage();
+            } else {
+                final String errorCode = UUID.randomUUID().toString();
+                message = "[" + errorCode + "] Failed to access to Web API.";
+                if (statusCode >= 400 && statusCode < 500) {
+                    if (logger.isDebugEnabled()) {
+                        logger.debug(message, e);
+                    }
+                } else {
+                    logger.warn(message, e);
+                }
+            }
+            response.sendError(statusCode, message);
+        }
+    }
+
+    /**
+     * Processes API requests to the search engine.
+     * Handles both regular API calls and plugin requests.
+     *
+     * @param request  the HTTP servlet request
+     * @param response the HTTP servlet response
+     * @param path     the request path after removing the prefix
+     */
+    protected void processRequest(final HttpServletRequest request, final HttpServletResponse response, final String path) {
+        if ("/_plugin".equals(path) || path.startsWith("/_plugin/")) {
+            processPluginRequest(request, response, path.replaceFirst("^/_plugin", StringUtil.EMPTY));
+            return;
+        }
+
+        final Method httpMethod = Method.valueOf(request.getMethod().toUpperCase(Locale.ROOT));
+        final CurlRequest curlRequest = ComponentUtil.getCurlHelper().request(httpMethod, path);
+
+        final String contentType = request.getHeader("Content-Type");
+        if (StringUtil.isNotEmpty(contentType)) {
+            curlRequest.header("Content-Type", contentType);
+        }
+
+        request.getParameterMap().entrySet().stream().forEach(entry -> {
+            if (entry.getValue().length > 1) {
+                curlRequest.param(entry.getKey(), String.join(",", entry.getValue()));
+            } else if (entry.getValue().length == 1) {
+                curlRequest.param(entry.getKey(), entry.getValue()[0]);
+            }
+        });
+        try (final CurlResponse curlResponse = curlRequest.onConnect((req, con) -> {
+            con.setDoOutput(true);
+            if (httpMethod != Method.GET && request.getContentLength() > 2) {
+                try (ServletInputStream in = request.getInputStream(); OutputStream out = con.getOutputStream()) {
+                    CopyUtil.copy(in, out);
+                } catch (final IOException e) {
+                    throw new WebApiException(HttpServletResponse.SC_BAD_REQUEST, e);
+                }
+            }
+        }).execute()) {
+
+            try (ServletOutputStream out = response.getOutputStream(); InputStream in = curlResponse.getContentAsStream()) {
+                response.setStatus(curlResponse.getHttpStatusCode());
+                writeHeaders(response);
+                final String responseContentType = curlResponse.getHeaderValue("Content-Type");
+                if (StringUtil.isBlank(responseContentType)) {
+                    response.setHeader("Content-Type", "application/json");
+                } else {
+                    response.setHeader("Content-Type", responseContentType);
+                }
+                CopyUtil.copy(in, out);
+            } catch (final ClientAbortException e) {
+                logger.debug("Client aborts this request.", e);
+            }
+        } catch (final Exception e) {
+            if (!(e.getCause() instanceof ClientAbortException)) {
+                throw new WebApiException(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e);
+            }
+            logger.debug("Client aborts this request.", e);
+        }
+    }
+
+    /**
+     * Processes requests for plugin resources (static files).
+     * Sets appropriate content types and serves files from the resource path.
+     *
+     * @param request  the HTTP servlet request
+     * @param response the HTTP servlet response
+     * @param path     the plugin resource path
+     */
+    protected void processPluginRequest(final HttpServletRequest request, final HttpServletResponse response, final String path) {
+        if (StringUtil.isNotBlank(path)) {
+            final String lowerPath = path.toLowerCase(Locale.ROOT);
+            if (lowerPath.endsWith("/")) {
+                response.setContentType("text/html;charset=utf-8");
+            } else {
+                final int dot = lowerPath.lastIndexOf('.');
+                if (dot >= 0) {
+                    final String contentType = EXTENSION_CONTENT_TYPES.get(lowerPath.substring(dot));
+                    if (contentType != null) {
+                        response.setContentType(contentType);
+                    }
+                }
+            }
+        }
+
+        Path filePath = ResourceUtil.getSitePath(MULTIPLE_SLASHES.split(DOTS.matcher(path).replaceAll(StringUtil.EMPTY)));
+        if (Files.isDirectory(filePath)) {
+            filePath = filePath.resolve("index.html");
+        }
+        if (Files.exists(filePath)) {
+            try (InputStream in = Files.newInputStream(filePath); ServletOutputStream out = response.getOutputStream()) {
+                response.setStatus(HttpServletResponse.SC_OK);
+                writeHeaders(response);
+                CopyUtil.copy(in, out);
+            } catch (final ClientAbortException e) {
+                logger.debug("Client aborts this request.", e);
+            } catch (final IOException e) {
+                logger.warn("Failed to read file: path={}, filePath={}", path, filePath, e);
+                throw new WebApiException(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e);
+            }
+        } else {
+            try {
+                writeHeaders(response);
+                response.sendError(HttpServletResponse.SC_NOT_FOUND, path + " is not found.");
+            } catch (final ClientAbortException e) {
+                logger.debug("Client aborts this request.", e);
+            } catch (final IOException e) {
+                logger.warn("Failed to send a not-found response: path={}", path, e);
+                throw new WebApiException(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e);
+            }
+        }
+    }
+
+    /**
+     * Sets the roles that are allowed to access the search engine API.
+     *
+     * @param acceptedRoles array of role names that can access the API
+     */
+    public void setAcceptedRoles(final String[] acceptedRoles) {
+        this.acceptedRoles = acceptedRoles;
+    }
+
+    /**
+     * Gets the server path with access token for API requests.
+     *
+     * @return the complete server path including the access token
+     * @throws FessSystemException if no access token is available
+     */
+    public String getServerPath() {
+        return getSessionManager().getAttribute(Constants.SEARCH_ENGINE_API_ACCESS_TOKEN, String.class)
+                .map(token -> ADMIN_SERVER + token)
+                .orElseThrow(() -> new FessSystemException("Cannot create an access token."));
+    }
+
+    /**
+     * Generates and saves a new access token for the current session.
+     * The token is used to authenticate API requests.
+     */
+    public void saveToken() {
+        getSessionManager().setAttribute(Constants.SEARCH_ENGINE_API_ACCESS_TOKEN, UUID.randomUUID().toString().replace("-", ""));
+    }
+
+    private SessionManager getSessionManager() {
+        return ComponentUtil.getComponent(SessionManager.class);
+    }
+
+    @Override
+    protected void writeHeaders(final HttpServletResponse response) {
+        // Vary is merged (addHeader) so it does not clobber CorsFilter's `Vary: Origin`.
+        ComponentUtil.getFessConfig().getApiDashboardResponseHeaderList().forEach(e -> {
+            if ("Vary".equalsIgnoreCase(e.getFirst())) {
+                response.addHeader(e.getFirst(), e.getSecond());
+            } else {
+                response.setHeader(e.getFirst(), e.getSecond());
+            }
+        });
+    }
+}

@@ -1,0 +1,309 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+ * Copyright 2009-2016 the CodeLibs Project and the Others.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND,
+ * either express or implied. See the License for the specific language
+ * governing permissions and limitations under the License.
+-->
+<web-app xmlns="https://jakarta.ee/xml/ns/jakartaee"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="https://jakarta.ee/xml/ns/jakartaee
+                             web-app_6_1.xsd"
+         version="6.1">
+
+  <!-- ================================================================================= -->
+  <!--                                                                    Servlet Filter -->
+  <!--                                                                    ============== -->
+  <filter>
+    <filter-name>encodingFilter</filter-name>
+    <filter-class>org.codelibs.fess.filter.EncodingFilter</filter-class>
+    <init-param>
+      <param-name>encoding</param-name>
+      <param-value>UTF-8</param-value>
+    </init-param>
+    <init-param>
+      <param-name>encodingRules</param-name>
+      <param-value>sjis:Shift_JIS,eucjp:EUC-JP</param-value>
+    </init-param>
+  </filter>
+
+  <filter>
+    <filter-name>rateLimitFilter</filter-name>
+    <filter-class>org.codelibs.fess.filter.RateLimitFilter</filter-class>
+  </filter>
+
+  <filter>
+    <filter-name>loadControlFilter</filter-name>
+    <filter-class>org.codelibs.fess.filter.LoadControlFilter</filter-class>
+  </filter>
+
+  <filter>
+    <filter-name>corsFilter</filter-name>
+    <filter-class>org.codelibs.fess.filter.CorsFilter</filter-class>
+  </filter>
+
+  <filter>
+    <filter-name>webApiFilter</filter-name>
+    <filter-class>org.codelibs.fess.filter.WebApiFilter</filter-class>
+  </filter>
+
+  <filter>
+    <filter-name>lastaPrepareFilter</filter-name>
+    <filter-class>org.lastaflute.web.servlet.filter.LastaPrepareFilter</filter-class>
+  </filter>
+
+  <filter>
+    <filter-name>staticThemeFilter</filter-name>
+    <filter-class>org.codelibs.fess.filter.StaticThemeFilter</filter-class>
+  </filter>
+
+  <filter>
+    <filter-name>serverErrorLoggingFilter</filter-name>
+    <filter-class>org.codelibs.fess.filter.ServerErrorLoggingFilter</filter-class>
+  </filter>
+
+  <filter>
+    <filter-name>lastaShowbaseFilter</filter-name>
+    <filter-class>org.lastaflute.web.servlet.filter.LastaShowbaseFilter</filter-class>
+    <init-param>
+      <param-name>errorLogging</param-name>
+      <param-value>false</param-value>
+    </init-param>
+  </filter>
+
+  <filter>
+    <filter-name>lastaToActionFilter</filter-name>
+    <filter-class>org.lastaflute.web.servlet.filter.LastaToActionFilter</filter-class>
+  </filter>
+
+  <filter>
+    <filter-name>httpHeaderSecurity</filter-name>
+    <filter-class>org.apache.catalina.filters.HttpHeaderSecurityFilter</filter-class>
+    <init-param>
+      <param-name>blockContentTypeSniffingEnabled</param-name>
+      <param-value>true</param-value>
+    </init-param>
+    <init-param>
+      <param-name>hstsEnabled</param-name>
+      <param-value>false</param-value>
+    </init-param>
+    <init-param>
+      <param-name>antiClickJackingEnabled</param-name>
+      <param-value>false</param-value>
+    </init-param>
+  </filter>
+
+  <!-- ================================================================================= -->
+  <!--                                                                    Filter Mapping -->
+  <!--                                                                    ============== -->
+  <filter-mapping>
+    <filter-name>encodingFilter</filter-name>
+    <url-pattern>/*</url-pattern>
+    <dispatcher>REQUEST</dispatcher>
+    <dispatcher>FORWARD</dispatcher><!-- TODO -->
+  </filter-mapping>
+
+  <filter-mapping>
+    <filter-name>lastaPrepareFilter</filter-name>
+    <url-pattern>/*</url-pattern>
+    <dispatcher>REQUEST</dispatcher>
+    <dispatcher>FORWARD</dispatcher>
+    <dispatcher>INCLUDE</dispatcher>
+  </filter-mapping>
+
+  <filter-mapping>
+    <filter-name>httpHeaderSecurity</filter-name>
+    <url-pattern>/*</url-pattern>
+    <dispatcher>REQUEST</dispatcher>
+  </filter-mapping>
+
+  <filter-mapping>
+    <filter-name>rateLimitFilter</filter-name>
+    <url-pattern>/*</url-pattern>
+    <dispatcher>REQUEST</dispatcher>
+  </filter-mapping>
+
+  <filter-mapping>
+    <filter-name>loadControlFilter</filter-name>
+    <url-pattern>/*</url-pattern>
+    <dispatcher>REQUEST</dispatcher>
+  </filter-mapping>
+
+  <filter-mapping>
+    <filter-name>corsFilter</filter-name>
+    <url-pattern>/*</url-pattern>
+    <dispatcher>REQUEST</dispatcher>
+  </filter-mapping>
+
+  <!--
+    SECURITY (C-1 / PR #3136): staticThemeFilter MUST come AFTER httpHeaderSecurity,
+    rateLimitFilter, loadControlFilter, and corsFilter on the REQUEST dispatch.
+
+    staticThemeFilter intercepts GET requests for an active static theme and serves the
+    theme's asset/index response directly (via StaticThemeResponder), writing the response and
+    returning WITHOUT calling chain.doFilter(). Filters mapped later in the chain
+    therefore do NOT run on static-theme responses, so any security filter required to
+    apply to those responses must be ordered before this mapping. This preserves the
+    behavior of the security filters on the REQUEST chain (rate-limiting per-request,
+    HSTS/clickjacking headers, CORS, load shedding). Do not move staticThemeFilter
+    ahead of these filters.
+  -->
+  <filter-mapping>
+    <filter-name>staticThemeFilter</filter-name>
+    <url-pattern>/*</url-pattern>
+    <dispatcher>REQUEST</dispatcher>
+  </filter-mapping>
+
+  <filter-mapping>
+    <filter-name>webApiFilter</filter-name>
+    <url-pattern>/*</url-pattern>
+    <dispatcher>REQUEST</dispatcher>
+  </filter-mapping>
+
+  <!--
+    serverErrorLoggingFilter MUST come BEFORE lastaShowbaseFilter: it installs the per-thread
+    server error handler that RequestLoggingFilter - which lastaShowbaseFilter runs inside
+    itself - calls when a request ends as a 500. Mapped after lastaShowbaseFilter it would
+    never be on the thread by the time the handler is looked up, and the 500 would again go
+    unreported. It is declared here rather than through FwWebDirection#directServletFilter
+    because the assistant director is also loaded by the crawler, thumbnail, suggest and chunk
+    child processes, whose classpath has no servlet API: a servlet type reachable from that
+    class kills every child process at DI container startup.
+  -->
+  <filter-mapping>
+    <filter-name>serverErrorLoggingFilter</filter-name>
+    <url-pattern>/*</url-pattern>
+    <dispatcher>REQUEST</dispatcher>
+  </filter-mapping>
+
+  <filter-mapping>
+    <filter-name>lastaShowbaseFilter</filter-name>
+    <url-pattern>/*</url-pattern>
+    <dispatcher>REQUEST</dispatcher>
+  </filter-mapping>
+
+  <filter-mapping>
+    <filter-name>lastaToActionFilter</filter-name>
+    <url-pattern>/*</url-pattern>
+    <dispatcher>REQUEST</dispatcher>
+  </filter-mapping>
+
+  <!-- ================================================================================= -->
+  <!--                                                                           Servlet -->
+  <!--                                                                           ======= -->
+  <servlet>
+    <servlet-name>errorPageServlet</servlet-name>
+    <servlet-class>org.codelibs.fess.servlet.ErrorPageServlet</servlet-class>
+  </servlet>
+
+  <!-- ================================================================================= -->
+  <!--                                                                   Servlet Mapping -->
+  <!--                                                                   =============== -->
+  <servlet-mapping>
+    <servlet-name>errorPageServlet</servlet-name>
+    <url-pattern>/error-page</url-pattern>
+  </servlet-mapping>
+
+  <!-- ================================================================================= -->
+  <!--                                                                  Servlet Listener -->
+  <!--                                                                  ================ -->
+  <listener>
+    <listener-class>org.apache.commons.fileupload2.jakarta.servlet6.JakartaFileCleaner</listener-class>
+  </listener>
+
+  <!-- ================================================================================= -->
+  <!--                                                                    Session Config -->
+  <!--                                                                    ============== -->
+  <!--
+    Session cookie configuration.
+
+    HttpOnly blocks JavaScript access to JSESSIONID, mitigating XSS-based session theft.
+    It is safe to enable on both HTTP and HTTPS deployments.
+
+    The Secure attribute is intentionally NOT set here so the default `bin/fess` experience
+    on http://localhost:8080 works out of the box. Setting `session.cookie.secure=true` in
+    fess_config.properties adds the Secure attribute to the session cookie at startup; this is
+    recommended for production HTTPS deployments, especially when TLS is terminated at a reverse
+    proxy (nginx, Caddy, ALB, etc.). Alternatively, have the proxy add the Secure attribute, or
+    set it at the Tomcat connector layer.
+
+    SameSite policy is configured via the `tomcat.sameSiteCookies` key in tomcat_config.properties
+    (default: lax; valid values: lax, strict, none). FessBoot applies it to all
+    CookieProcessor instances at startup. Strict will break OAuth/OIDC redirect flows.
+    See https://tomcat.apache.org/tomcat-10.1-doc/config/cookie-processor.html
+  -->
+  <session-config>
+    <cookie-config>
+      <http-only>true</http-only>
+    </cookie-config>
+    <tracking-mode>COOKIE</tracking-mode>
+  </session-config>
+
+  <!-- ================================================================================= -->
+  <!--                                                                      Welcome File -->
+  <!--                                                                      ============ -->
+<!--
+    <welcome-file-list>
+    </welcome-file-list>
+  -->
+
+  <!-- ================================================================================= -->
+  <!--                                                                        JSP Config -->
+  <!--                                                                        ========== -->
+  <jsp-config>
+    <jsp-property-group>
+      <url-pattern>*.jsp</url-pattern>
+      <el-ignored>false</el-ignored>
+      <page-encoding>UTF-8</page-encoding>
+      <scripting-invalid>false</scripting-invalid>
+      <include-prelude>/WEB-INF/view/common/common.jsp</include-prelude>
+    </jsp-property-group>
+  </jsp-config>
+
+  <!-- ================================================================================= -->
+  <!--                                                                        Error Page -->
+  <!--                                                                        ========== -->
+  <!--
+    Every status below is handled by org.codelibs.fess.servlet.ErrorPageServlet, mapped at
+    /error-page above. The servlet reads the real status from the container's
+    jakarta.servlet.error.status_code request attribute (set by the ERROR dispatch), not from
+    this list, so the <error-code> here only selects which statuses reach it.
+  -->
+  <error-page>
+    <error-code>400</error-code>
+    <location>/error-page</location>
+  </error-page>
+  <error-page>
+    <error-code>401</error-code>
+    <location>/error-page</location>
+  </error-page>
+  <error-page>
+    <error-code>403</error-code>
+    <location>/error-page</location>
+  </error-page>
+  <error-page>
+    <error-code>404</error-code>
+    <location>/error-page</location>
+  </error-page>
+  <error-page>
+    <error-code>408</error-code>
+    <location>/error-page</location>
+  </error-page>
+  <error-page>
+    <error-code>429</error-code>
+    <location>/error-page</location>
+  </error-page>
+  <error-page>
+    <error-code>500</error-code>
+    <location>/error-page</location>
+  </error-page>
+</web-app>

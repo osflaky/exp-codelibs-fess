@@ -1,0 +1,267 @@
+/*
+ * Copyright 2012-2025 CodeLibs Project and the Others.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND,
+ * either express or implied. See the License for the specific language
+ * governing permissions and limitations under the License.
+ */
+package org.codelibs.fess.opensearch.config.exentity;
+
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+import org.codelibs.core.lang.StringUtil;
+import org.codelibs.fess.Constants;
+import org.codelibs.fess.app.service.RequestHeaderService;
+import org.codelibs.fess.app.service.WebAuthenticationService;
+import org.codelibs.fess.crawler.client.CrawlerClientFactory;
+import org.codelibs.fess.crawler.client.http.HcHttpClient;
+import org.codelibs.fess.crawler.client.http.config.CredentialsConfig;
+import org.codelibs.fess.crawler.client.http.config.WebAuthenticationConfig;
+import org.codelibs.fess.helper.SystemHelper;
+import org.codelibs.fess.mylasta.direction.FessConfig;
+import org.codelibs.fess.mylasta.direction.FessProp;
+import org.codelibs.fess.unit.UnitFessTestCase;
+import org.codelibs.fess.util.ComponentUtil;
+import org.junit.jupiter.api.Test;
+import org.codelibs.fesen.opensearch.common.SetOnce;
+
+public class WebConfigTest extends UnitFessTestCase {
+
+    @Override
+    protected boolean isUseOneTimeContainer() {
+        return true;
+    }
+
+    @Test
+    public void test_initializeClientFactory() {
+        final Map<String, String> systemPropMap = new HashMap<>();
+        FessProp.propMap.clear();
+        FessConfig fessConfig = new FessConfig.SimpleImpl() {
+            @Override
+            public String getSystemProperty(final String key, final String defaultValue) {
+                return systemPropMap.getOrDefault(key, defaultValue);
+            }
+
+            @Override
+            public boolean isCrawlerIgnoreRobotsTxt() {
+                return false;
+            }
+
+            @Override
+            public String getHttpProxyHost() {
+                return StringUtil.EMPTY;
+            }
+
+            @Override
+            public String getHttpProxyPort() {
+                return StringUtil.EMPTY;
+            }
+        };
+        ComponentUtil.setFessConfig(fessConfig);
+        SystemHelper systemHelper = new SystemHelper() {
+            @Override
+            public String getProductVersion() {
+                return "98.76";
+            }
+        };
+        ComponentUtil.register(systemHelper, "systemHelper");
+        WebAuthenticationService webAuthenticationService = new WebAuthenticationService() {
+            @Override
+            public List<WebAuthentication> getWebAuthenticationList(final String webConfigId) {
+                return Collections.emptyList();
+            }
+        };
+        ComponentUtil.register(webAuthenticationService, WebAuthenticationService.class.getCanonicalName());
+        RequestHeaderService requestHeaderService = new RequestHeaderService() {
+            @Override
+            public List<RequestHeader> getRequestHeaderList(final String webConfigId) {
+                return Collections.emptyList();
+            }
+        };
+        ComponentUtil.register(requestHeaderService, RequestHeaderService.class.getCanonicalName());
+
+        final SetOnce<Map<String, Object>> initParamMapSet = new SetOnce<>();
+        WebConfig webConfig = new WebConfig();
+        webConfig.setUserAgent(Constants.CRAWLING_USER_AGENT_PREFIX + "1.0" + Constants.CRAWLING_USER_AGENT_SUFFIX);
+        CrawlerClientFactory crawlerClientFactory = webConfig.initializeClientFactory(() -> new CrawlerClientFactory() {
+            public void setInitParameterMap(final Map<String, Object> params) {
+                initParamMapSet.set(params);
+            }
+        });
+        assertNotNull(crawlerClientFactory);
+        Map<String, Object> initParamMap = initParamMapSet.get();
+        assertNotNull(initParamMap);
+        assertEquals(0, ((org.codelibs.fess.crawler.client.http.RequestHeader[]) initParamMap.get("requestHeaders")).length);
+        assertEquals("Mozilla/5.0 (compatible; Fess/98.76; +http://fess.codelibs.org/bot.html)", initParamMap.get("userAgent"));
+        assertEquals(0, ((WebAuthenticationConfig[]) initParamMap.get(HcHttpClient.AUTHENTICATIONS_PROPERTY)).length);
+        assertTrue(Boolean.valueOf(initParamMap.get("robotsTxtEnabled").toString()).booleanValue());
+    }
+
+    /**
+     * The proxy credentials reach the crawler clients in the library-independent shape they read them
+     * in. Handing over the HTTP library's own credentials instead failed the crawl outright, because
+     * the clients cast the value to their own library's type.
+     */
+    @Test
+    public void test_initializeClientFactoryWithProxyCredentials() {
+        final Map<String, String> systemPropMap = new HashMap<>();
+        FessProp.propMap.clear();
+        FessConfig fessConfig = new FessConfig.SimpleImpl() {
+            @Override
+            public String getSystemProperty(final String key, final String defaultValue) {
+                return systemPropMap.getOrDefault(key, defaultValue);
+            }
+
+            @Override
+            public boolean isCrawlerIgnoreRobotsTxt() {
+                return false;
+            }
+
+            @Override
+            public String getHttpProxyHost() {
+                return "proxy.example.com";
+            }
+
+            @Override
+            public String getHttpProxyPort() {
+                return "8080";
+            }
+
+            @Override
+            public String getHttpProxyUsername() {
+                return "proxyuser";
+            }
+
+            @Override
+            public String getHttpProxyPassword() {
+                return "proxypass";
+            }
+        };
+        ComponentUtil.setFessConfig(fessConfig);
+        SystemHelper systemHelper = new SystemHelper() {
+            @Override
+            public String getProductVersion() {
+                return "98.76";
+            }
+        };
+        ComponentUtil.register(systemHelper, "systemHelper");
+        WebAuthenticationService webAuthenticationService = new WebAuthenticationService() {
+            @Override
+            public List<WebAuthentication> getWebAuthenticationList(final String webConfigId) {
+                return Collections.emptyList();
+            }
+        };
+        ComponentUtil.register(webAuthenticationService, WebAuthenticationService.class.getCanonicalName());
+        RequestHeaderService requestHeaderService = new RequestHeaderService() {
+            @Override
+            public List<RequestHeader> getRequestHeaderList(final String webConfigId) {
+                return Collections.emptyList();
+            }
+        };
+        ComponentUtil.register(requestHeaderService, RequestHeaderService.class.getCanonicalName());
+
+        final SetOnce<Map<String, Object>> initParamMapSet = new SetOnce<>();
+        WebConfig webConfig = new WebConfig();
+        CrawlerClientFactory crawlerClientFactory = webConfig.initializeClientFactory(() -> new CrawlerClientFactory() {
+            public void setInitParameterMap(final Map<String, Object> params) {
+                initParamMapSet.set(params);
+            }
+        });
+        assertNotNull(crawlerClientFactory);
+        Map<String, Object> initParamMap = initParamMapSet.get();
+        assertNotNull(initParamMap);
+        assertEquals("proxy.example.com", initParamMap.get(HcHttpClient.PROXY_HOST_PROPERTY));
+        assertEquals("8080", initParamMap.get(HcHttpClient.PROXY_PORT_PROPERTY));
+
+        final Object proxyCredentials = initParamMap.get(HcHttpClient.PROXY_CREDENTIALS_PROPERTY);
+        assertTrue(proxyCredentials instanceof WebAuthenticationConfig);
+        final CredentialsConfig credentials = ((WebAuthenticationConfig) proxyCredentials).getCredentials();
+        assertEquals("proxyuser", credentials.getUsername());
+        assertEquals("proxypass", credentials.getPassword());
+    }
+
+    @Test
+    public void test_initializeClientFactoryWithConfigParameter() {
+        final Map<String, String> systemPropMap = new HashMap<>();
+        FessProp.propMap.clear();
+        FessConfig fessConfig = new FessConfig.SimpleImpl() {
+            @Override
+            public String getSystemProperty(final String key, final String defaultValue) {
+                return systemPropMap.getOrDefault(key, defaultValue);
+            }
+
+            @Override
+            public boolean isCrawlerIgnoreRobotsTxt() {
+                return false;
+            }
+
+            @Override
+            public String getHttpProxyHost() {
+                return StringUtil.EMPTY;
+            }
+
+            @Override
+            public String getHttpProxyPort() {
+                return StringUtil.EMPTY;
+            }
+
+            @Override
+            public String getAppEncryptPropertyPattern() {
+                return ".*password|.*key|.*token|.*secret";
+            }
+        };
+        ComponentUtil.setFessConfig(fessConfig);
+        SystemHelper systemHelper = new SystemHelper() {
+            @Override
+            public String getProductVersion() {
+                return "98.76";
+            }
+        };
+        ComponentUtil.register(systemHelper, "systemHelper");
+        WebAuthenticationService webAuthenticationService = new WebAuthenticationService() {
+            @Override
+            public List<WebAuthentication> getWebAuthenticationList(final String webConfigId) {
+                return Collections.emptyList();
+            }
+        };
+        ComponentUtil.register(webAuthenticationService, WebAuthenticationService.class.getCanonicalName());
+        RequestHeaderService requestHeaderService = new RequestHeaderService() {
+            @Override
+            public List<RequestHeader> getRequestHeaderList(final String webConfigId) {
+                return Collections.emptyList();
+            }
+        };
+        ComponentUtil.register(requestHeaderService, RequestHeaderService.class.getCanonicalName());
+
+        final SetOnce<Map<String, Object>> initParamMapSet = new SetOnce<>();
+        WebConfig webConfig = new WebConfig();
+        final String userAgent = "TestAgent";
+        webConfig.setUserAgent(userAgent);
+        webConfig.setConfigParameter("""
+                client.robotsTxtEnabled=false
+                """);
+        CrawlerClientFactory crawlerClientFactory = webConfig.initializeClientFactory(() -> new CrawlerClientFactory() {
+            public void setInitParameterMap(final Map<String, Object> params) {
+                initParamMapSet.set(params);
+            }
+        });
+        assertNotNull(crawlerClientFactory);
+        Map<String, Object> initParamMap = initParamMapSet.get();
+        assertNotNull(initParamMap);
+        assertEquals(0, ((org.codelibs.fess.crawler.client.http.RequestHeader[]) initParamMap.get("requestHeaders")).length);
+        assertEquals(userAgent, initParamMap.get("userAgent"));
+        assertEquals(0, ((WebAuthenticationConfig[]) initParamMap.get(HcHttpClient.AUTHENTICATIONS_PROPERTY)).length);
+        assertFalse(Boolean.valueOf(initParamMap.get("robotsTxtEnabled").toString()).booleanValue());
+    }
+}

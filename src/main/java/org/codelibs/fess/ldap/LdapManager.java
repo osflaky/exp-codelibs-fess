@@ -1,0 +1,2016 @@
+/*
+ * Copyright 2012-2025 CodeLibs Project and the Others.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND,
+ * either express or implied. See the License for the specific language
+ * governing permissions and limitations under the License.
+ */
+package org.codelibs.fess.ldap;
+
+import static org.codelibs.core.stream.StreamUtil.stream;
+
+import java.util.ArrayList;
+import java.util.Base64;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.Hashtable;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
+import java.util.function.BiConsumer;
+import java.util.function.Consumer;
+import java.util.function.Supplier;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
+import javax.naming.CommunicationException;
+import javax.naming.Context;
+import javax.naming.NamingEnumeration;
+import javax.naming.NamingException;
+import javax.naming.TimeLimitExceededException;
+import javax.naming.directory.Attribute;
+import javax.naming.directory.Attributes;
+import javax.naming.directory.BasicAttribute;
+import javax.naming.directory.BasicAttributes;
+import javax.naming.directory.DirContext;
+import javax.naming.directory.InitialDirContext;
+import javax.naming.directory.ModificationItem;
+import javax.naming.directory.SearchControls;
+import javax.naming.directory.SearchResult;
+import javax.naming.ldap.LdapName;
+import javax.naming.ldap.Rdn;
+
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+import org.codelibs.core.lang.StringUtil;
+import org.codelibs.core.timer.TimeoutManager;
+import org.codelibs.fess.Constants;
+import org.codelibs.fess.entity.FessUser;
+import org.codelibs.fess.entity.FessUser.PermissionState;
+import org.codelibs.fess.exception.LdapConfigurationException;
+import org.codelibs.fess.exception.LdapOperationException;
+import org.codelibs.fess.helper.SystemHelper;
+import org.codelibs.fess.mylasta.direction.FessConfig;
+import org.codelibs.fess.opensearch.user.exentity.Group;
+import org.codelibs.fess.opensearch.user.exentity.Role;
+import org.codelibs.fess.opensearch.user.exentity.User;
+import org.codelibs.fess.util.ComponentUtil;
+import org.codelibs.fess.util.OptionalUtil;
+import org.dbflute.optional.OptionalEntity;
+import org.dbflute.util.DfTypeUtil;
+
+import jakarta.annotation.PostConstruct;
+
+/**
+ * Manages LDAP connections and operations.
+ */
+public class LdapManager {
+    private static final Logger logger = LogManager.getLogger(LdapManager.class);
+
+    /**
+     * The JNDI environment property bounding the connection setup. The JDK LDAP provider applies it to the TCP
+     * connect, to the TLS handshake and to the response of the initial bind, so an unset value leaves a bind
+     * against an unresponsive directory waiting forever.
+     */
+    protected static final String JNDI_CONNECT_TIMEOUT = "com.sun.jndi.ldap.connect.timeout";
+
+    /**
+     * The JNDI environment property bounding how long a bound connection waits for a response. It does not apply
+     * to the initial bind, which is bounded by {@link #JNDI_CONNECT_TIMEOUT}.
+     */
+    protected static final String JNDI_READ_TIMEOUT = "com.sun.jndi.ldap.read.timeout";
+
+    /** A thread-local variable to hold the directory context. */
+    protected ThreadLocal<DirContextHolder> contextLocal = new ThreadLocal<>();
+
+    /** A flag to indicate if the LDAP connection is bound. */
+    protected volatile boolean isBind = false;
+
+    /** The Fess configuration. */
+    protected FessConfig fessConfig;
+
+    /**
+     * Default constructor.
+     */
+    public LdapManager() {
+        // do nothing
+    }
+
+    /**
+     * Initializes the LDAP manager.
+     */
+    @PostConstruct
+    public void init() {
+        if (logger.isDebugEnabled()) {
+            logger.debug("Initializing {}", this.getClass().getSimpleName());
+        }
+        fessConfig = ComponentUtil.getFessConfig();
+    }
+
+    /**
+     * Creates the environment for LDAP connection.
+     *
+     * @param initialContextFactory The initial context factory.
+     * @param securityAuthentication The security authentication.
+     * @param providerUrl The provider URL.
+     * @param principal The principal.
+     * @param credntials The credentials.
+     * @return The environment for LDAP connection.
+     */
+    protected Hashtable<String, String> createEnvironment(final String initialContextFactory, final String securityAuthentication,
+            final String providerUrl, final String principal, final String credntials) {
+        final Hashtable<String, String> env = new Hashtable<>();
+        putEnv(env, Context.INITIAL_CONTEXT_FACTORY, initialContextFactory);
+        putEnv(env, Context.SECURITY_AUTHENTICATION, securityAuthentication);
+        putEnv(env, Context.PROVIDER_URL, providerUrl);
+        putEnv(env, Context.SECURITY_PRINCIPAL, principal);
+        putEnv(env, Context.SECURITY_CREDENTIALS, credntials);
+        if (providerUrl != null && providerUrl.startsWith("ldaps://")) {
+            putEnv(env, Context.SECURITY_PROTOCOL, "ssl");
+        }
+        putTimeoutEnv(env, JNDI_CONNECT_TIMEOUT, getConnectTimeout());
+        putTimeoutEnv(env, JNDI_READ_TIMEOUT, getReadTimeout());
+        return env;
+    }
+
+    /**
+     * Puts a key-value pair to the environment.
+     *
+     * @param env The environment.
+     * @param key The key.
+     * @param value The value.
+     */
+    protected void putEnv(final Hashtable<String, String> env, final String key, final String value) {
+        if (value == null) {
+            throw new LdapConfigurationException(key + " is null.");
+        }
+        env.put(key, value);
+    }
+
+    /**
+     * Puts a timeout property to the environment. A value of 0 or less leaves the property unset, which restores
+     * the JNDI default of waiting for the JDK/OS default (the connect timeout) or forever (the read timeout).
+     *
+     * @param env The environment.
+     * @param key The JNDI property name.
+     * @param timeout The timeout in milliseconds.
+     */
+    protected void putTimeoutEnv(final Hashtable<String, String> env, final String key, final int timeout) {
+        if (timeout > 0) {
+            env.put(key, Integer.toString(timeout));
+        }
+    }
+
+    /**
+     * Returns the configured connection timeout in milliseconds.
+     *
+     * @return The connection timeout, or 0 or less to leave it unbounded.
+     */
+    protected int getConnectTimeout() {
+        return fessConfig.getLdapConnectTimeoutAsInteger();
+    }
+
+    /**
+     * Returns the configured read timeout in milliseconds.
+     *
+     * @return The read timeout, or 0 or less to leave it unbounded.
+     */
+    protected int getReadTimeout() {
+        return fessConfig.getLdapReadTimeoutAsInteger();
+    }
+
+    /**
+     * Returns the configured search time limit in milliseconds.
+     *
+     * @return The search time limit, or 0 or less for no limit.
+     */
+    protected int getSearchTimeLimit() {
+        return fessConfig.getLdapSearchTimeLimitAsInteger();
+    }
+
+    /**
+     * Creates the admin environment for LDAP connection.
+     *
+     * @return The admin environment for LDAP connection.
+     */
+    protected Hashtable<String, String> createAdminEnv() {
+        return createEnvironment(//
+                fessConfig.getLdapInitialContextFactory(), //
+                fessConfig.getLdapSecurityAuthentication(), fessConfig.getLdapProviderUrl(), //
+                fessConfig.getLdapAdminSecurityPrincipal(), //
+                fessConfig.getLdapAdminSecurityCredentials());
+    }
+
+    /**
+     * Creates the search environment for LDAP connection.
+     *
+     * @param username The username.
+     * @param password The password.
+     * @return The search environment for LDAP connection.
+     */
+    protected Hashtable<String, String> createSearchEnv(final String username, final String password) {
+        return createEnvironment(//
+                fessConfig.getLdapInitialContextFactory(), //
+                fessConfig.getLdapSecurityAuthentication(), //
+                fessConfig.getLdapProviderUrl(), //
+                fessConfig.getLdapSecurityPrincipal(username), password);
+    }
+
+    /**
+     * Creates the search environment for LDAP connection.
+     *
+     * @return The search environment for LDAP connection.
+     */
+    protected Hashtable<String, String> createSearchEnv() {
+        return createEnvironment(//
+                fessConfig.getLdapInitialContextFactory(), //
+                fessConfig.getLdapSecurityAuthentication(), fessConfig.getLdapProviderUrl(), //
+                fessConfig.getLdapAdminSecurityPrincipal(), //
+                fessConfig.getLdapAdminSecurityCredentials());
+    }
+
+    /**
+     * Updates the LDAP configuration.
+     */
+    public void updateConfig() {
+        isBind = false;
+    }
+
+    /**
+     * Validates the LDAP connection.
+     *
+     * @return True if the LDAP connection is valid, otherwise false.
+     */
+    protected boolean validate() {
+        if (!isBind) {
+            if (fessConfig.getLdapAdminSecurityPrincipal() == null || fessConfig.getLdapAdminSecurityCredentials() == null) {
+                // no credentials
+                return !fessConfig.isLdapAuthValidation();
+            }
+            try {
+                final Hashtable<String, String> env = createAdminEnv();
+                try (DirContextHolder holder = getDirContext(() -> env)) {
+                    final DirContext context = holder.get();
+                    if (logger.isDebugEnabled()) {
+                        logger.debug("Logged in as Bind DN. {}", context);
+                    }
+                    isBind = true;
+                }
+            } catch (final LdapConfigurationException e) {
+                logger.warn("LDAP configuration error: {}", e.getMessage(), e);
+            } catch (final LdapOperationException e) {
+                logger.warn("LDAP connection failed: {}", e.getMessage(), e);
+            } catch (final Exception e) {
+                logger.warn("Unexpected error during LDAP validation: {}", e.getMessage(), e);
+            }
+        }
+        return isBind;
+    }
+
+    /**
+     * Authenticates a user with the specified username and password against LDAP.
+     *
+     * @param username the username for authentication
+     * @param password the password for authentication
+     * @return an optional containing the authenticated user if successful, empty otherwise
+     */
+    public OptionalEntity<FessUser> login(final String username, final String password) {
+        // Add defensive null/blank checks
+        if (StringUtil.isBlank(username) || StringUtil.isBlank(password)) {
+            if (logger.isDebugEnabled()) {
+                logger.debug("Login failed: username or password is blank");
+            }
+            return OptionalEntity.empty();
+        }
+
+        if (StringUtil.isBlank(fessConfig.getLdapProviderUrl()) || !validate()) {
+            return OptionalEntity.empty();
+        }
+
+        try {
+            final Hashtable<String, String> env = createSearchEnv(username, password);
+            try (DirContextHolder holder = getDirContext(() -> env)) {
+                final DirContext context = holder.get();
+                final LdapUser ldapUser = createLdapUser(username, env);
+                if (!allowEmptyGroupAndRole(ldapUser)) {
+                    if (logger.isDebugEnabled()) {
+                        logger.debug("Login failed. No permissions. {}", context);
+                    }
+                    return OptionalEntity.empty();
+                }
+                if (logger.isDebugEnabled()) {
+                    logger.debug("Logged in. {}", context);
+                }
+                return OptionalEntity.of(ldapUser);
+            }
+        } catch (final LdapOperationException e) {
+            logger.debug("LDAP operation failed during login for user: {}", username, e);
+        } catch (final Exception e) {
+            logger.debug("Login failed for user: {}", username, e);
+        }
+        return OptionalEntity.empty();
+    }
+
+    /**
+     * Authenticates a user with the specified username without password validation.
+     *
+     * @param username the username for authentication
+     * @return an optional containing the authenticated user if successful, empty otherwise
+     */
+    public OptionalEntity<FessUser> login(final String username) {
+        // Add defensive null/blank check
+        if (StringUtil.isBlank(username)) {
+            if (logger.isDebugEnabled()) {
+                logger.debug("Login failed: username is blank");
+            }
+            return OptionalEntity.empty();
+        }
+
+        try {
+            final Hashtable<String, String> env = createSearchEnv();
+            try (DirContextHolder holder = getDirContext(() -> env)) {
+                final DirContext context = holder.get();
+                // This overload is the SSO entry point -- no password, because an identity provider
+                // already authenticated the user and asserted this name.
+                final LdapUser ldapUser = createLdapUser(username, env, true);
+                if (!allowEmptyGroupAndRole(ldapUser)) {
+                    if (logger.isDebugEnabled()) {
+                        logger.debug("Login failed. No permissions. {}", context);
+                    }
+                    return OptionalEntity.empty();
+                }
+                if (logger.isDebugEnabled()) {
+                    logger.debug("Logged in. {}", context);
+                }
+                return OptionalEntity.of(ldapUser);
+            }
+        } catch (final LdapOperationException e) {
+            logger.debug("LDAP operation failed during login for user: {}", username, e);
+        } catch (final Exception e) {
+            logger.debug("Login failed for user: {}", username, e);
+        }
+        return OptionalEntity.empty();
+    }
+
+    /**
+     * Checks if the specified LDAP user is allowed to have empty group and role permissions.
+     *
+     * @param ldapUser the LDAP user to check
+     * @return true if empty permissions are allowed, false otherwise
+     */
+    protected boolean allowEmptyGroupAndRole(final LdapUser ldapUser) {
+        if (fessConfig.isLdapAllowEmptyPermission()) {
+            return true;
+        }
+
+        final SystemHelper systemHelper = ComponentUtil.getSystemHelper();
+        for (final String permission : ldapUser.getPermissions()) {
+            if (!systemHelper.isUserPermission(permission)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Creates a new LDAP user instance with the specified username and environment.
+     *
+     * @param username the username for the LDAP user
+     * @param env the environment configuration for LDAP connection
+     * @return a new LdapUser instance
+     */
+    protected LdapUser createLdapUser(final String username, final Hashtable<String, String> env) {
+        return createLdapUser(username, env, false);
+    }
+
+    /**
+     * Creates an LDAP user.
+     *
+     * @param username the user name
+     * @param env the LDAP environment
+     * @param nameFromProvider whether an identity provider asserted the name rather than a user
+     *            typing it at the login form
+     * @return the LDAP user
+     */
+    protected LdapUser createLdapUser(final String username, final Hashtable<String, String> env, final boolean nameFromProvider) {
+        return new LdapUser(env, username, nameFromProvider);
+    }
+
+    /**
+     * Retrieves roles for the specified LDAP user based on the provided filters.
+     *
+     * @param ldapUser the LDAP user to retrieve roles for
+     * @param bindDn the bind DN for LDAP connection
+     * @param accountFilter the account filter pattern
+     * @param groupFilter the group filter pattern
+     * @param lazyLoading the lazy loading consumer for roles
+     * @return an array of role names
+     */
+    public String[] getRoles(final LdapUser ldapUser, final String bindDn, final String accountFilter, final String groupFilter,
+            final Consumer<String[]> lazyLoading) {
+        final Set<String> roleSet = new HashSet<>();
+
+        if (fessConfig.isLdapRoleSearchUserEnabled()) {
+            roleSet.add(getUserPermissionName(ldapUser));
+        }
+
+        // LDAP: cn=%s
+        // AD: (&(objectClass=user)(sAMAccountName=%s))
+        final String filter = String.format(accountFilter, escapeLDAPSearchFilter(ldapUser.getName()));
+        if (logger.isDebugEnabled()) {
+            logger.debug("Account filter: {}", filter);
+        }
+        final Set<String> subRoleSet = new HashSet<>();
+        final Set<String> sAMAccountGroupNameSet = new HashSet<>();
+        search(bindDn, filter, new String[] { fessConfig.getLdapMemberofAttribute() }, () -> ldapUser.getEnvironment(), result -> {
+            processSearchRoles(result, entryDn -> {
+                final String roleName = getSearchRoleName(entryDn);
+                final String roleType = updateSearchRoles(roleSet, entryDn, roleName);
+                if (fessConfig.getRoleSearchGroupPrefix().equals(roleType) && fessConfig.isLdapSamaccountnameGroup()) {
+                    sAMAccountGroupNameSet.add(roleName);
+                }
+                if (StringUtil.isNotBlank(groupFilter)) {
+                    subRoleSet.add(entryDn);
+                }
+            });
+        });
+
+        if (logger.isDebugEnabled()) {
+            logger.debug("Roles: {}", roleSet);
+        }
+        final String[] roles = roleSet.toArray(new String[roleSet.size()]);
+
+        if (!subRoleSet.isEmpty()) {
+            // Set before scheduling, not inside the task: the task does not start until the timer
+            // notices it a second later, and the user is already being handed their direct groups
+            // right now. Only this branch schedules anything, so a deployment that leaves
+            // ldap.group.filter blank -- the shipped default -- never leaves RESOLVED.
+            ldapUser.setPermissionState(PermissionState.PENDING);
+            scheduleSubRoleUpdate(ldapUser, bindDn, subRoleSet, groupFilter, roleSet, sAMAccountGroupNameSet, lazyLoading);
+        }
+
+        return roles;
+    }
+
+    /**
+     * Schedules the nested-group resolution to run off the calling thread.
+     *
+     * <p>Split out from {@link #getRoles} so that the boundary is overridable: the body itself,
+     * {@link #updateSubRoles}, runs synchronously, so a test can drive the whole resolution
+     * without waiting on the shared timer.
+     *
+     * @param ldapUser the user whose groups are being resolved
+     * @param bindDn the bind DN for the search
+     * @param subRoleSet the group DNs to expand
+     * @param groupFilter the configured group filter
+     * @param roleSet the role set to add to
+     * @param sAMAccountGroupNameSet the group names still needing a sAMAccountName lookup
+     * @param lazyLoading the callback that publishes the resolved roles
+     */
+    protected void scheduleSubRoleUpdate(final LdapUser ldapUser, final String bindDn, final Set<String> subRoleSet,
+            final String groupFilter, final Set<String> roleSet, final Set<String> sAMAccountGroupNameSet,
+            final Consumer<String[]> lazyLoading) {
+        TimeoutManager.getInstance()
+                .addTimeoutTarget(
+                        () -> updateSubRoles(ldapUser, bindDn, subRoleSet, groupFilter, roleSet, sAMAccountGroupNameSet, lazyLoading), 0,
+                        false);
+    }
+
+    /**
+     * Resolves the nested groups and publishes the result.
+     *
+     * <p>Everything here can throw {@link LdapOperationException}. Without the catch below that
+     * throw escapes the {@code TimeoutManager} task, where the only handler is corelib's own
+     * "Failed to process a task." -- a message that names neither LDAP nor the user -- and
+     * {@code lazyLoading} is never called, so the user keeps their direct groups for the whole
+     * session with nothing connecting the two. The permissions already published by the
+     * synchronous pass are deliberately left in place; what changes is that the user is now told
+     * the rest is missing.
+     *
+     * @param ldapUser the user whose groups are being resolved
+     * @param bindDn the bind DN for the search
+     * @param subRoleSet the group DNs to expand
+     * @param groupFilter the configured group filter
+     * @param roleSet the role set to add to
+     * @param sAMAccountGroupNameSet the group names still needing a sAMAccountName lookup
+     * @param lazyLoading the callback that publishes the resolved roles
+     */
+    protected void updateSubRoles(final LdapUser ldapUser, final String bindDn, final Set<String> subRoleSet, final String groupFilter,
+            final Set<String> roleSet, final Set<String> sAMAccountGroupNameSet, final Consumer<String[]> lazyLoading) {
+        boolean resolved = false;
+        try {
+            // Inside the try, not above it: ComponentUtil.getComponent throws when the container is
+            // gone, and that throw on a TimeoutManager thread would leave the state PENDING forever
+            // -- the notice stuck on screen for the whole session, which is exactly what this method
+            // exists to avoid.
+            final SystemHelper systemHelper = ComponentUtil.getSystemHelper();
+            sAMAccountGroupNameSet.stream().forEach(groupName -> {
+                getSAMAccountGroupName(bindDn, groupName).ifPresent(sAMAccountGroupName -> {
+                    roleSet.add(systemHelper.getSearchRoleByDirectoryGroup(normalizePermissionName(sAMAccountGroupName)));
+                });
+            });
+            processSubRoles(ldapUser, bindDn, subRoleSet, groupFilter, roleSet);
+            if (logger.isDebugEnabled()) {
+                logger.debug("Roles (lazy loading): {}", roleSet);
+            }
+            lazyLoading.accept(roleSet.toArray(new String[roleSet.size()]));
+            resolved = true;
+        } catch (final Exception e) {
+            logger.warn("Failed to resolve the nested LDAP groups of {}. Keeping the groups resolved so far.", ldapUser.getName(), e);
+        } finally {
+            if (resolved) {
+                ldapUser.setPermissionState(PermissionState.RESOLVED);
+            } else if (ldapUser.getPermissionState() == PermissionState.PENDING) {
+                // Only PENDING is downgraded, so a walk that failed cannot overwrite a RESOLVED a
+                // concurrent one already settled -- the user holds those groups either way, and
+                // claiming otherwise would show a failure notice over a complete permission set.
+                // The read-then-write is not atomic, but both writers are only reporting.
+                ldapUser.setPermissionState(PermissionState.FAILED);
+            }
+        }
+    }
+
+    /**
+     * Gets the sAMAccountName for a group from the LDAP directory.
+     *
+     * @param bindDn the bind DN to search within
+     * @param groupName the name of the group to search for
+     * @return an optional containing the sAMAccountName if found, empty otherwise
+     */
+    protected OptionalEntity<String> getSAMAccountGroupName(final String bindDn, final String groupName) {
+        // Add defensive null/blank checks
+        if (StringUtil.isBlank(bindDn) || StringUtil.isBlank(groupName)) {
+            if (logger.isDebugEnabled()) {
+                logger.debug("bindDn or groupName is blank: bindDn={}, groupName={}", bindDn, groupName);
+            }
+            return OptionalEntity.empty();
+        }
+
+        final Hashtable<String, String> env = createSearchEnv();
+        try (DirContextHolder holder = getDirContext(() -> env)) {
+            final DirContext context = holder.get();
+            final SearchControls searchControls = createSearchControls(null);
+            if (logger.isDebugEnabled()) {
+                logger.debug("Searching for sAMAccountName of group: {} on {}", groupName, bindDn);
+            }
+            final NamingEnumeration<SearchResult> results =
+                    context.search(bindDn, "(name=" + escapeLDAPSearchFilter(groupName) + ")", searchControls);
+            if (results.hasMore()) {
+                final SearchResult searchResult = results.next();
+                final Attribute attribute = searchResult.getAttributes().get("sAMAccountName");
+                if (logger.isDebugEnabled()) {
+                    logger.debug("sAMAccountName: {}", attribute);
+                }
+                if (attribute != null && attribute.get() instanceof final String sAMAccountName) {
+                    return OptionalEntity.of(sAMAccountName);
+                }
+            }
+        } catch (final NamingException e) {
+            logger.warn("LDAP naming exception while getting sAMAccountName for group: {}", groupName, e);
+        } catch (final Exception e) {
+            logger.warn("Unexpected exception while getting sAMAccountName for group: {}", groupName, e);
+        }
+        return OptionalEntity.empty();
+    }
+
+    /**
+     * Processes sub-roles for the specified LDAP user.
+     *
+     * @param ldapUser the LDAP user to process sub-roles for
+     * @param bindDn the bind DN for LDAP connection
+     * @param subRoleSet the set of sub-roles to process
+     * @param groupFilter the group filter pattern
+     * @param roleSet the set of roles to update
+     */
+    protected void processSubRoles(final LdapUser ldapUser, final String bindDn, final Set<String> subRoleSet, final String groupFilter,
+            final Set<String> roleSet) {
+        // (member:1.2.840.113556.1.4.1941:=%s)
+        if (subRoleSet.isEmpty()) {
+            return;
+        }
+        String filter = subRoleSet.stream().map(s -> String.format(groupFilter, s)).collect(Collectors.joining());
+        if (subRoleSet.size() > 1) {
+            filter = "(|" + filter + ")";
+        }
+
+        if (logger.isDebugEnabled()) {
+            logger.debug("Group filter: {}", filter);
+        }
+        final SystemHelper systemHelper = ComponentUtil.getSystemHelper();
+        final Set<String> sAMAccountGroupNameSet = new LinkedHashSet<>();
+        search(bindDn, filter, null, () -> ldapUser.getEnvironment(), result -> {
+            for (final SearchResult srcrslt : result) {
+                final String groupDn = srcrslt.getNameInNamespace();
+                if (logger.isDebugEnabled()) {
+                    logger.debug("Group DN: {}", groupDn);
+                }
+                final String groupName = getSearchRoleName(groupDn);
+                final String roleType = updateSearchRoles(roleSet, groupDn, groupName);
+                if (fessConfig.getRoleSearchGroupPrefix().equals(roleType) && fessConfig.isLdapSamaccountnameGroup()) {
+                    sAMAccountGroupNameSet.add(groupName);
+                }
+            }
+        });
+        // Collected above and looked up here, once the search has returned. getSAMAccountGroupName
+        // asks for the admin credentials, but getDirContext discards that request whenever a
+        // context is already open on this thread -- and inside the consumer above one is, the one
+        // search() opened with the end user's own credentials. Running the lookups after search()
+        // has closed it makes this method bind as the same principal as the identical call in
+        // updateSubRoles, instead of as whoever happened to be logging in.
+        if (!sAMAccountGroupNameSet.isEmpty()) {
+            // One context for the whole batch. Without it each lookup would open, bind and close its
+            // own connection, because search() has already closed the thread-local one -- and a
+            // recursive AD group filter routinely yields tens of nested groups per user.
+            final Hashtable<String, String> env = createSearchEnv();
+            try (DirContextHolder holder = getDirContext(() -> env)) {
+                sAMAccountGroupNameSet.forEach(groupName -> {
+                    getSAMAccountGroupName(bindDn, groupName).ifPresent(sAMAccountGroupName -> {
+                        roleSet.add(systemHelper.getSearchRoleByDirectoryGroup(normalizePermissionName(sAMAccountGroupName)));
+                    });
+                });
+            }
+        }
+    }
+
+    /**
+     * Names the permission that stands for this user themselves.
+     *
+     * <p>The one place that name is spelled. {@link LdapUser#getPermissions()} needs it too -- it
+     * appends the user's own permission to both the synchronous result and the nested-group walk's
+     * later write, so that the lazy write does not hand back a strictly smaller set -- and building
+     * it there from its parts instead let the two spellings diverge, putting two permissions for
+     * one identity into the same set.
+     *
+     * <p>Folding applies to the name, never to a string the prefix is already part of. The prefix
+     * marks which kind of permission this is; it is not a character of anybody's name, and it is
+     * configurable to a letter -- {@code role.search.role.prefix} ships as {@code R}. Every other
+     * permission {@code ldap.lowercase.permission.name} touches has been folded that way since the
+     * setting was added.
+     *
+     * <p>{@code getCanonicalLdapName} drops everything up to the first backslash, which is what
+     * turns a NetBIOS-qualified {@code DOMAIN\alice} typed at the login form into the {@code alice}
+     * the documents are indexed under. A name an identity provider asserted is not qualified that
+     * way, so running it through the same step takes the tail of a backslash that belongs to the
+     * name -- and hands the account holding it the permission of whatever follows. The account
+     * does not have to be able to reach that permission any other way, so this is the user half of
+     * what {@code getLeafCommonName} closed for group and role names.
+     *
+     * @param ldapUser the user logging in
+     * @return the user's own permission name
+     */
+    public String getUserPermissionName(final LdapUser ldapUser) {
+        final SystemHelper systemHelper = ComponentUtil.getSystemHelper();
+        final String name = normalizePermissionName(ldapUser.getName());
+        if (ldapUser.isNameFromProvider()) {
+            return systemHelper.getSearchRoleByDirectoryUser(name);
+        }
+        return systemHelper.getSearchRoleByUser(name);
+    }
+
+    /**
+     * Updates the role set with search roles based on the entry DN and name.
+     *
+     * @param roleSet the set of roles to update
+     * @param entryDn the entry DN to check
+     * @param name the role name
+     * @return the role type prefix if successful, null otherwise
+     */
+    protected String updateSearchRoles(final Set<String> roleSet, final String entryDn, final String name) {
+        if (StringUtil.isNotBlank(name)) {
+            final SystemHelper systemHelper = ComponentUtil.getSystemHelper();
+            final boolean isRole = entryDn.toLowerCase(Locale.ROOT).indexOf("ou=role") != -1;
+            // The directory variants: the name already came out of this entry's own DN, so it must
+            // not be re-read as a NetBIOS-qualified "DOMAIN\name" and truncated to its tail.
+            if (isRole) {
+                if (fessConfig.isLdapRoleSearchRoleEnabled()) {
+                    roleSet.add(systemHelper.getSearchRoleByDirectoryRole(normalizePermissionName(name)));
+                    return fessConfig.getRoleSearchRolePrefix();
+                }
+            } else if (fessConfig.isLdapRoleSearchGroupEnabled()) {
+                roleSet.add(systemHelper.getSearchRoleByDirectoryGroup(normalizePermissionName(name)));
+                return fessConfig.getRoleSearchGroupPrefix();
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Escapes special characters in an LDAP search filter to prevent LDAP injection attacks.
+     *
+     * @param filter the LDAP search filter to escape (null is treated as empty string)
+     * @return the escaped filter string safe for use in LDAP queries (empty string if filter is null)
+     * @see <a href="https://tools.ietf.org/html/rfc4515">RFC 4515 - LDAP String Representation of Search Filters</a>
+     * @deprecated Use {@link LdapUtil#escapeValue(String)} instead
+     */
+    @Deprecated
+    protected String escapeLDAPSearchFilter(final String filter) {
+        return LdapUtil.escapeValue(filter);
+    }
+
+    /**
+     * Normalizes a permission name based on configuration settings.
+     *
+     * @param name the permission name to normalize
+     * @return the normalized permission name
+     */
+    public String normalizePermissionName(final String name) {
+        if (fessConfig.isLdapLowercasePermissionName()) {
+            return name.toLowerCase(Locale.ROOT);
+        }
+        return name;
+    }
+
+    /**
+     * Processes search results to extract roles using a BiConsumer.
+     *
+     * @param result the list of search results
+     * @param consumer the BiConsumer to process entry DN and role name
+     * @throws NamingException if LDAP naming exception occurs
+     */
+    protected void processSearchRoles(final List<SearchResult> result, final BiConsumer<String, String> consumer) throws NamingException {
+        processSearchRoles(result, entryDn -> {
+            final String name = getSearchRoleName(entryDn);
+            if (name != null) {
+                consumer.accept(entryDn, name);
+            }
+        });
+    }
+
+    /**
+     * Processes search results to extract roles using a Consumer.
+     *
+     * @param result the list of search results
+     * @param consumer the Consumer to process entry DN
+     * @throws NamingException if LDAP naming exception occurs
+     */
+    protected void processSearchRoles(final List<SearchResult> result, final Consumer<String> consumer) throws NamingException {
+        for (final SearchResult srcrslt : result) {
+            final Attributes attrs = srcrslt.getAttributes();
+
+            //get group attr
+            final Attribute attr = attrs.get(fessConfig.getLdapMemberofAttribute());
+            if (attr == null) {
+                continue;
+            }
+
+            for (int i = 0; i < attr.size(); i++) {
+                final Object attrValue = attr.get(i);
+                if (attrValue != null) {
+                    final String entryDn = attrValue.toString();
+
+                    if (logger.isDebugEnabled()) {
+                        logger.debug("entryDn: {}", entryDn);
+                    }
+                    consumer.accept(entryDn);
+                }
+            }
+        }
+    }
+
+    /**
+     * Extracts the role name from an LDAP entry DN.
+     *
+     * <p>The name is taken as an RDN value rather than by cutting the DN text at the first comma.
+     * A comma is legal inside a CN and appears in the DN escaped ({@code CN=sales\,EMEA}); cutting
+     * on it stops inside the name and yields a prefix of it, so two entries whose names share a
+     * prefix collapse onto one permission -- and a name whose prefix happens to be a privileged
+     * one is granted that privilege.
+     *
+     * @param entryDn the LDAP entry DN
+     * @return the extracted role name, or null if the DN names no CN or cannot be parsed
+     */
+    protected String getSearchRoleName(final String entryDn) {
+        if (entryDn == null) {
+            return null;
+        }
+        final String value = getLeafCommonName(entryDn);
+        if (value == null) {
+            return null;
+        }
+        if (fessConfig.isLdapGroupNameWithUnderscores()) {
+            return replaceWithUnderscores(value);
+        }
+        return value;
+    }
+
+    /**
+     * Returns the value of the CN nearest the leaf of a DN.
+     *
+     * <p>Searches from the leaf so that it keeps naming the entry itself, which is what reading the
+     * first {@code cn=} in the DN text did. Returns null rather than falling back to a text scan
+     * when the DN does not parse: the DN comes from the directory through
+     * {@code SearchResult#getNameInNamespace()}, so a parse failure means the value cannot be
+     * trusted to name what it appears to name, and contributing no permission is the safe outcome.
+     *
+     * @param entryDn the LDAP entry DN
+     * @return the CN value, or null when the DN carries no CN or cannot be parsed
+     */
+    protected String getLeafCommonName(final String entryDn) {
+        try {
+            final LdapName name = new LdapName(entryDn);
+            final List<Rdn> rdns = name.getRdns();
+            for (int i = rdns.size() - 1; i >= 0; i--) {
+                // toAttributes(), not getValue(): getValue() on a multi-valued RDN such as
+                // "CN=a+OU=b" returns whichever half came first, which need not be the CN.
+                final Attribute cn = rdns.get(i).toAttributes().get("cn");
+                if (cn != null) {
+                    final Object cnValue = cn.get();
+                    if (cnValue != null) {
+                        return cnValue.toString();
+                    }
+                }
+            }
+        } catch (final NamingException | IllegalArgumentException e) {
+            // IllegalArgumentException as well as InvalidNameException: Rdn#unescapeValue reports a
+            // malformed escape by throwing unchecked, and letting that out of here would turn one
+            // unparseable group DN into a failed login rather than one missing permission.
+            logger.warn("Failed to read a common name from DN: {}", entryDn, e);
+        }
+        return null;
+    }
+
+    /**
+     * Replaces special characters in a string with underscores for group names.
+     *
+     * @param value the string to process
+     * @return the string with special characters replaced by underscores
+     */
+    protected String replaceWithUnderscores(final String value) {
+        return value.replaceAll("[/\\\\\\[\\]:;|=,+\\*?<>]", "_");
+    }
+
+    /**
+     * Sets an attribute value from search results using a Consumer.
+     *
+     * @param result the list of search results
+     * @param name the attribute name
+     * @param consumer the Consumer to process the attribute value
+     */
+    protected void setAttributeValue(final List<SearchResult> result, final String name, final Consumer<Object> consumer) {
+        final List<Object> attrList = getAttributeValueList(result, name);
+        if (!attrList.isEmpty()) {
+            consumer.accept(attrList.get(0));
+        }
+    }
+
+    /**
+     * Gets a list of attribute values from search results.
+     *
+     * @param result the list of search results
+     * @param name the attribute name
+     * @return a list of attribute values
+     */
+    protected List<Object> getAttributeValueList(final List<SearchResult> result, final String name) {
+        try {
+            for (final SearchResult srcrslt : result) {
+                final Attributes attrs = srcrslt.getAttributes();
+
+                final Attribute attr = attrs.get(name);
+                if (attr == null) {
+                    continue;
+                }
+
+                final List<Object> attrList = new ArrayList<>();
+                for (int i = 0; i < attr.size(); i++) {
+                    final Object attrValue = attr.get(i);
+                    if (attrValue != null) {
+                        attrList.add(attrValue);
+                    }
+                }
+                return attrList;
+            }
+            return Collections.emptyList();
+        } catch (final NamingException e) {
+            throw new LdapOperationException("Failed to parse attribute values for " + name, e);
+        }
+    }
+
+    /**
+     * Applies LDAP attributes to a user object.
+     *
+     * @param user the user object to populate with LDAP attributes
+     */
+    public void apply(final User user) {
+        if (!fessConfig.isLdapAdminEnabled(user.getName())) {
+            return;
+        }
+
+        final Supplier<Hashtable<String, String>> adminEnv = this::createAdminEnv;
+        search(fessConfig.getLdapAdminUserBaseDn(), fessConfig.getLdapAdminUserFilter(user.getName()), null, adminEnv, result -> {
+            if (!result.isEmpty()) {
+                setAttributeValue(result, fessConfig.getLdapAttrSurname(), o -> user.setSurname(o.toString()));
+                setAttributeValue(result, fessConfig.getLdapAttrGivenName(), o -> user.setGivenName(o.toString()));
+                setAttributeValue(result, fessConfig.getLdapAttrMail(), o -> user.setMail(o.toString()));
+                setAttributeValue(result, fessConfig.getLdapAttrEmployeeNumber(), o -> user.setEmployeeNumber(o.toString()));
+                setAttributeValue(result, fessConfig.getLdapAttrTelephoneNumber(), o -> user.setTelephoneNumber(o.toString()));
+                setAttributeValue(result, fessConfig.getLdapAttrHomePhone(), o -> user.setHomePhone(o.toString()));
+                setAttributeValue(result, fessConfig.getLdapAttrHomePostalAddress(), o -> user.setHomePostalAddress(o.toString()));
+                setAttributeValue(result, fessConfig.getLdapAttrLabeledURI(), o -> user.setLabeledURI(o.toString()));
+                setAttributeValue(result, fessConfig.getLdapAttrRoomNumber(), o -> user.setRoomNumber(o.toString()));
+                setAttributeValue(result, fessConfig.getLdapAttrDescription(), o -> user.setDescription(o.toString()));
+                setAttributeValue(result, fessConfig.getLdapAttrTitle(), o -> user.setTitle(o.toString()));
+                setAttributeValue(result, fessConfig.getLdapAttrPager(), o -> user.setPager(o.toString()));
+                setAttributeValue(result, fessConfig.getLdapAttrStreet(), o -> user.setStreet(o.toString()));
+                setAttributeValue(result, fessConfig.getLdapAttrPostalCode(), o -> user.setPostalCode(o.toString()));
+                setAttributeValue(result, fessConfig.getLdapAttrPhysicalDeliveryOfficeName(),
+                        o -> user.setPhysicalDeliveryOfficeName(o.toString()));
+                setAttributeValue(result, fessConfig.getLdapAttrDestinationIndicator(), o -> user.setDestinationIndicator(o.toString()));
+                setAttributeValue(result, fessConfig.getLdapAttrInternationaliSDNNumber(),
+                        o -> user.setInternationaliSDNNumber(o.toString()));
+                setAttributeValue(result, fessConfig.getLdapAttrState(), o -> user.setState(o.toString()));
+                setAttributeValue(result, fessConfig.getLdapAttrEmployeeType(), o -> user.setEmployeeType(o.toString()));
+                setAttributeValue(result, fessConfig.getLdapAttrFacsimileTelephoneNumber(),
+                        o -> user.setFacsimileTelephoneNumber(o.toString()));
+                setAttributeValue(result, fessConfig.getLdapAttrPostOfficeBox(), o -> user.setPostOfficeBox(o.toString()));
+                setAttributeValue(result, fessConfig.getLdapAttrInitials(), o -> user.setInitials(o.toString()));
+                setAttributeValue(result, fessConfig.getLdapAttrCarLicense(), o -> user.setCarLicense(o.toString()));
+                setAttributeValue(result, fessConfig.getLdapAttrMobile(), o -> user.setMobile(o.toString()));
+                setAttributeValue(result, fessConfig.getLdapAttrPostalAddress(), o -> user.setPostalAddress(o.toString()));
+                setAttributeValue(result, fessConfig.getLdapAttrCity(), o -> user.setCity(o.toString()));
+                setAttributeValue(result, fessConfig.getLdapAttrTeletexTerminalIdentifier(),
+                        o -> user.setTeletexTerminalIdentifier(o.toString()));
+                setAttributeValue(result, fessConfig.getLdapAttrX121Address(), o -> user.setX121Address(o.toString()));
+                setAttributeValue(result, fessConfig.getLdapAttrBusinessCategory(), o -> user.setBusinessCategory(o.toString()));
+                setAttributeValue(result, fessConfig.getLdapAttrRegisteredAddress(), o -> user.setRegisteredAddress(o.toString()));
+                setAttributeValue(result, fessConfig.getLdapAttrDisplayName(), o -> user.setDisplayName(o.toString()));
+                setAttributeValue(result, fessConfig.getLdapAttrPreferredLanguage(), o -> user.setPreferredLanguage(o.toString()));
+                setAttributeValue(result, fessConfig.getLdapAttrDepartmentNumber(), o -> user.setDepartmentNumber(o.toString()));
+                setAttributeValue(result, fessConfig.getLdapAttrUidNumber(), o -> user.setUidNumber(DfTypeUtil.toLong(o)));
+                setAttributeValue(result, fessConfig.getLdapAttrGidNumber(), o -> user.setGidNumber(DfTypeUtil.toLong(o)));
+                setAttributeValue(result, fessConfig.getLdapAttrHomeDirectory(), o -> user.setHomeDirectory(o.toString()));
+            }
+        });
+
+        // groups and roles
+        search(fessConfig.getLdapAdminUserBaseDn(), fessConfig.getLdapAdminUserFilter(user.getName()),
+                new String[] { fessConfig.getLdapMemberofAttribute() }, adminEnv, result -> {
+                    if (!result.isEmpty()) {
+                        final List<String> groupList = new ArrayList<>();
+                        final List<String> roleList = new ArrayList<>();
+                        final String lowerGroupDn = fessConfig.getLdapAdminGroupBaseDn().toLowerCase(Locale.ROOT);
+                        final String lowerRoleDn = fessConfig.getLdapAdminRoleBaseDn().toLowerCase(Locale.ROOT);
+                        processSearchRoles(result, (entryDn, name) -> {
+                            final String lowerEntryDn = entryDn.toLowerCase(Locale.ROOT);
+                            if (lowerEntryDn.indexOf(lowerGroupDn) != -1) {
+                                groupList.add(Base64.getUrlEncoder().encodeToString(name.getBytes(Constants.CHARSET_UTF_8)));
+                            } else if (lowerEntryDn.indexOf(lowerRoleDn) != -1) {
+                                roleList.add(Base64.getUrlEncoder().encodeToString(name.getBytes(Constants.CHARSET_UTF_8)));
+                            }
+                        });
+                        user.setGroups(groupList.toArray(new String[groupList.size()]));
+                        user.setRoles(roleList.toArray(new String[roleList.size()]));
+                    }
+                });
+
+    }
+
+    /**
+     * Inserts or updates a user in LDAP directory.
+     *
+     * @param user the user object to insert or update
+     */
+    public void insert(final User user) {
+        if (!fessConfig.isLdapAdminEnabled(user.getName())) {
+            return;
+        }
+
+        final Supplier<Hashtable<String, String>> adminEnv = this::createAdminEnv;
+        final String userDN = fessConfig.getLdapAdminUserSecurityPrincipal(user.getName());
+        // attributes
+        search(fessConfig.getLdapAdminUserBaseDn(), fessConfig.getLdapAdminUserFilter(user.getName()), null, adminEnv, result -> {
+            if (!result.isEmpty()) {
+                modifyUserAttributes(user, adminEnv, userDN, result);
+            } else {
+                final BasicAttributes entry = new BasicAttributes();
+                addUserAttributes(entry, user);
+                final Attribute oc = fessConfig.getLdapAdminUserObjectClassAttribute();
+                entry.put(oc);
+                insert(userDN, entry, adminEnv);
+            }
+        });
+
+        // groups and roles
+        search(fessConfig.getLdapAdminUserBaseDn(), fessConfig.getLdapAdminUserFilter(user.getName()),
+                new String[] { fessConfig.getLdapMemberofAttribute() }, adminEnv, result -> {
+                    if (!result.isEmpty()) {
+                        final List<String> oldGroupList = new ArrayList<>();
+                        final List<String> oldRoleList = new ArrayList<>();
+                        final String lowerGroupDn = fessConfig.getLdapAdminGroupBaseDn().toLowerCase(Locale.ROOT);
+                        final String lowerRoleDn = fessConfig.getLdapAdminRoleBaseDn().toLowerCase(Locale.ROOT);
+                        processSearchRoles(result, (entryDn, name) -> {
+                            final String lowerEntryDn = entryDn.toLowerCase(Locale.ROOT);
+                            if (lowerEntryDn.indexOf(lowerGroupDn) != -1) {
+                                oldGroupList.add(name);
+                            } else if (lowerEntryDn.indexOf(lowerRoleDn) != -1) {
+                                oldRoleList.add(name);
+                            }
+                        });
+                        final List<String> newGroupList = stream(user.getGroupNames()).get(stream -> stream.collect(Collectors.toList()));
+                        stream(user.getGroupNames()).of(stream -> stream.forEach(name -> {
+                            if (oldGroupList.contains(name)) {
+                                oldGroupList.remove(name);
+                                newGroupList.remove(name);
+                            }
+                        }));
+                        oldGroupList.stream().forEach(name -> {
+                            search(fessConfig.getLdapAdminGroupBaseDn(), fessConfig.getLdapAdminGroupFilter(name), null, adminEnv,
+                                    subResult -> {
+                                        if (!subResult.isEmpty()) {
+                                            final List<ModificationItem> modifyList = new ArrayList<>();
+                                            modifyDeleteEntry(modifyList, "member", userDN);
+                                            modify(fessConfig.getLdapAdminGroupSecurityPrincipal(name), modifyList, adminEnv);
+                                        }
+                                    });
+                        });
+                        newGroupList.stream().forEach(name -> {
+                            search(fessConfig.getLdapAdminGroupBaseDn(), fessConfig.getLdapAdminGroupFilter(name), null, adminEnv,
+                                    subResult -> {
+                                        if (subResult.isEmpty()) {
+                                            final Group group = new Group();
+                                            group.setName(name);
+                                            insert(group);
+                                        }
+                                        final List<ModificationItem> modifyList = new ArrayList<>();
+                                        modifyAddEntry(modifyList, "member", userDN);
+                                        modify(fessConfig.getLdapAdminGroupSecurityPrincipal(name), modifyList, adminEnv);
+                                    });
+                        });
+
+                        final List<String> newRoleList = stream(user.getRoleNames()).get(stream -> stream.collect(Collectors.toList()));
+                        stream(user.getRoleNames()).of(stream -> stream.forEach(name -> {
+                            if (oldRoleList.contains(name)) {
+                                oldRoleList.remove(name);
+                                newRoleList.remove(name);
+                            }
+                        }));
+                        oldRoleList.stream().forEach(name -> {
+                            search(fessConfig.getLdapAdminRoleBaseDn(), fessConfig.getLdapAdminRoleFilter(name), null, adminEnv,
+                                    subResult -> {
+                                        if (!subResult.isEmpty()) {
+                                            final List<ModificationItem> modifyList = new ArrayList<>();
+                                            modifyDeleteEntry(modifyList, "member", userDN);
+                                            modify(fessConfig.getLdapAdminRoleSecurityPrincipal(name), modifyList, adminEnv);
+                                        }
+                                    });
+                        });
+                        newRoleList.stream().forEach(name -> {
+                            search(fessConfig.getLdapAdminRoleBaseDn(), fessConfig.getLdapAdminRoleFilter(name), null, adminEnv,
+                                    subResult -> {
+                                        if (subResult.isEmpty()) {
+                                            final Role role = new Role();
+                                            role.setName(name);
+                                            insert(role);
+                                        }
+                                        final List<ModificationItem> modifyList = new ArrayList<>();
+                                        modifyAddEntry(modifyList, "member", userDN);
+                                        modify(fessConfig.getLdapAdminRoleSecurityPrincipal(name), modifyList, adminEnv);
+                                    });
+                        });
+                    } else {
+                        stream(user.getGroupNames()).of(stream -> stream.forEach(name -> {
+                            search(fessConfig.getLdapAdminGroupBaseDn(), fessConfig.getLdapAdminGroupFilter(name), null, adminEnv,
+                                    subResult -> {
+                                        if (subResult.isEmpty()) {
+                                            final Group group = new Group();
+                                            group.setName(name);
+                                            insert(group);
+                                        }
+                                        final List<ModificationItem> modifyList = new ArrayList<>();
+                                        modifyAddEntry(modifyList, "member", userDN);
+                                        modify(fessConfig.getLdapAdminGroupSecurityPrincipal(name), modifyList, adminEnv);
+                                    });
+                        }));
+
+                        stream(user.getRoleNames()).of(stream -> stream.forEach(name -> {
+                            search(fessConfig.getLdapAdminRoleBaseDn(), fessConfig.getLdapAdminRoleFilter(name), null, adminEnv,
+                                    subResult -> {
+                                        if (subResult.isEmpty()) {
+                                            final Role role = new Role();
+                                            role.setName(name);
+                                            insert(role);
+                                        }
+                                        final List<ModificationItem> modifyList = new ArrayList<>();
+                                        modifyAddEntry(modifyList, "member", userDN);
+                                        modify(fessConfig.getLdapAdminRoleSecurityPrincipal(name), modifyList, adminEnv);
+                                    });
+                        }));
+                    }
+                });
+
+    }
+
+    /**
+     * Modifies user attributes in the LDAP directory.
+     *
+     * @param user the user object with new attribute values
+     * @param adminEnv the supplier for admin environment
+     * @param userDN the DN of the user entry
+     * @param result the search results containing current attributes
+     */
+    protected void modifyUserAttributes(final User user, final Supplier<Hashtable<String, String>> adminEnv, final String userDN,
+            final List<SearchResult> result) {
+        final List<ModificationItem> modifyList = new ArrayList<>();
+        if (user.getOriginalPassword() != null) {
+            modifyReplaceEntry(modifyList, "userPassword", user.getOriginalPassword());
+        }
+
+        final String attrSurname = fessConfig.getLdapAttrSurname();
+        OptionalUtil.ofNullable(user.getSurname())
+                .filter(StringUtil::isNotBlank)
+                .ifPresent(s -> modifyReplaceEntry(modifyList, attrSurname, s))
+                .orElse(() -> getAttributeValueList(result, attrSurname).stream()
+                        .forEach(v -> modifyDeleteEntry(modifyList, attrSurname, v)));
+        final String attrGivenName = fessConfig.getLdapAttrGivenName();
+        OptionalUtil.ofNullable(user.getGivenName())
+                .filter(StringUtil::isNotBlank)
+                .ifPresent(s -> modifyReplaceEntry(modifyList, attrGivenName, s))
+                .orElse(() -> getAttributeValueList(result, attrGivenName).stream()
+                        .forEach(v -> modifyDeleteEntry(modifyList, attrGivenName, v)));
+        final String attrMail = fessConfig.getLdapAttrMail();
+        OptionalUtil.ofNullable(user.getMail())
+                .filter(StringUtil::isNotBlank)
+                .ifPresent(s -> modifyReplaceEntry(modifyList, attrMail, s))
+                .orElse(() -> getAttributeValueList(result, attrMail).stream().forEach(v -> modifyDeleteEntry(modifyList, attrMail, v)));
+        final String attrEmployeeNumber = fessConfig.getLdapAttrEmployeeNumber();
+        OptionalUtil.ofNullable(user.getEmployeeNumber())
+                .filter(StringUtil::isNotBlank)
+                .ifPresent(s -> modifyReplaceEntry(modifyList, attrEmployeeNumber, s))
+                .orElse(() -> getAttributeValueList(result, attrEmployeeNumber).stream()
+                        .forEach(v -> modifyDeleteEntry(modifyList, attrEmployeeNumber, v)));
+        final String attrTelephoneNumber = fessConfig.getLdapAttrTelephoneNumber();
+        OptionalUtil.ofNullable(user.getTelephoneNumber())
+                .filter(StringUtil::isNotBlank)
+                .ifPresent(s -> modifyReplaceEntry(modifyList, attrTelephoneNumber, s))
+                .orElse(() -> getAttributeValueList(result, attrTelephoneNumber).stream()
+                        .forEach(v -> modifyDeleteEntry(modifyList, attrTelephoneNumber, v)));
+        final String attrHomePhone = fessConfig.getLdapAttrHomePhone();
+        OptionalUtil.ofNullable(user.getHomePhone())
+                .filter(StringUtil::isNotBlank)
+                .ifPresent(s -> modifyReplaceEntry(modifyList, attrHomePhone, s))
+                .orElse(() -> getAttributeValueList(result, attrHomePhone).stream()
+                        .forEach(v -> modifyDeleteEntry(modifyList, attrHomePhone, v)));
+        final String attrHomePostalAddress = fessConfig.getLdapAttrHomePostalAddress();
+        OptionalUtil.ofNullable(user.getHomePostalAddress())
+                .filter(StringUtil::isNotBlank)
+                .ifPresent(s -> modifyReplaceEntry(modifyList, attrHomePostalAddress, s))
+                .orElse(() -> getAttributeValueList(result, attrHomePostalAddress).stream()
+                        .forEach(v -> modifyDeleteEntry(modifyList, attrHomePostalAddress, v)));
+        final String attrLabeledURI = fessConfig.getLdapAttrLabeledURI();
+        OptionalUtil.ofNullable(user.getLabeledURI())
+                .filter(StringUtil::isNotBlank)
+                .ifPresent(s -> modifyReplaceEntry(modifyList, attrLabeledURI, s))
+                .orElse(() -> getAttributeValueList(result, attrLabeledURI).stream()
+                        .forEach(v -> modifyDeleteEntry(modifyList, attrLabeledURI, v)));
+        final String attrRoomNumber = fessConfig.getLdapAttrRoomNumber();
+        OptionalUtil.ofNullable(user.getRoomNumber())
+                .filter(StringUtil::isNotBlank)
+                .ifPresent(s -> modifyReplaceEntry(modifyList, attrRoomNumber, s))
+                .orElse(() -> getAttributeValueList(result, attrRoomNumber).stream()
+                        .forEach(v -> modifyDeleteEntry(modifyList, attrRoomNumber, v)));
+        final String attrDescription = fessConfig.getLdapAttrDescription();
+        OptionalUtil.ofNullable(user.getDescription())
+                .filter(StringUtil::isNotBlank)
+                .ifPresent(s -> modifyReplaceEntry(modifyList, attrDescription, s))
+                .orElse(() -> getAttributeValueList(result, attrDescription).stream()
+                        .forEach(v -> modifyDeleteEntry(modifyList, attrDescription, v)));
+        final String attrTitle = fessConfig.getLdapAttrTitle();
+        OptionalUtil.ofNullable(user.getTitle())
+                .filter(StringUtil::isNotBlank)
+                .ifPresent(s -> modifyReplaceEntry(modifyList, attrTitle, s))
+                .orElse(() -> getAttributeValueList(result, attrTitle).stream().forEach(v -> modifyDeleteEntry(modifyList, attrTitle, v)));
+        final String attrPager = fessConfig.getLdapAttrPager();
+        OptionalUtil.ofNullable(user.getPager())
+                .filter(StringUtil::isNotBlank)
+                .ifPresent(s -> modifyReplaceEntry(modifyList, attrPager, s))
+                .orElse(() -> getAttributeValueList(result, attrPager).stream().forEach(v -> modifyDeleteEntry(modifyList, attrPager, v)));
+        final String attrStreet = fessConfig.getLdapAttrStreet();
+        OptionalUtil.ofNullable(user.getStreet())
+                .filter(StringUtil::isNotBlank)
+                .ifPresent(s -> modifyReplaceEntry(modifyList, attrStreet, s))
+                .orElse(() -> getAttributeValueList(result, attrStreet).stream()
+                        .forEach(v -> modifyDeleteEntry(modifyList, attrStreet, v)));
+        final String attrPostalCode = fessConfig.getLdapAttrPostalCode();
+        OptionalUtil.ofNullable(user.getPostalCode())
+                .filter(StringUtil::isNotBlank)
+                .ifPresent(s -> modifyReplaceEntry(modifyList, attrPostalCode, s))
+                .orElse(() -> getAttributeValueList(result, attrPostalCode).stream()
+                        .forEach(v -> modifyDeleteEntry(modifyList, attrPostalCode, v)));
+        final String attrPhysicalDeliveryOfficeName = fessConfig.getLdapAttrPhysicalDeliveryOfficeName();
+        OptionalUtil.ofNullable(user.getPhysicalDeliveryOfficeName())
+                .filter(StringUtil::isNotBlank)
+                .ifPresent(s -> modifyReplaceEntry(modifyList, attrPhysicalDeliveryOfficeName, s))
+                .orElse(() -> getAttributeValueList(result, attrPhysicalDeliveryOfficeName).stream()
+                        .forEach(v -> modifyDeleteEntry(modifyList, attrPhysicalDeliveryOfficeName, v)));
+        final String attrDestinationIndicator = fessConfig.getLdapAttrDestinationIndicator();
+        OptionalUtil.ofNullable(user.getDestinationIndicator())
+                .filter(StringUtil::isNotBlank)
+                .ifPresent(s -> modifyReplaceEntry(modifyList, attrDestinationIndicator, s))
+                .orElse(() -> getAttributeValueList(result, attrDestinationIndicator).stream()
+                        .forEach(v -> modifyDeleteEntry(modifyList, attrDestinationIndicator, v)));
+        final String attrInternationaliSDNNumber = fessConfig.getLdapAttrInternationaliSDNNumber();
+        OptionalUtil.ofNullable(user.getInternationaliSDNNumber())
+                .filter(StringUtil::isNotBlank)
+                .ifPresent(s -> modifyReplaceEntry(modifyList, attrInternationaliSDNNumber, s))
+                .orElse(() -> getAttributeValueList(result, attrInternationaliSDNNumber).stream()
+                        .forEach(v -> modifyDeleteEntry(modifyList, attrInternationaliSDNNumber, v)));
+        final String attrState = fessConfig.getLdapAttrState();
+        OptionalUtil.ofNullable(user.getState())
+                .filter(StringUtil::isNotBlank)
+                .ifPresent(s -> modifyReplaceEntry(modifyList, attrState, s))
+                .orElse(() -> getAttributeValueList(result, attrState).stream().forEach(v -> modifyDeleteEntry(modifyList, attrState, v)));
+        final String attrEmployeeType = fessConfig.getLdapAttrEmployeeType();
+        OptionalUtil.ofNullable(user.getEmployeeType())
+                .filter(StringUtil::isNotBlank)
+                .ifPresent(s -> modifyReplaceEntry(modifyList, attrEmployeeType, s))
+                .orElse(() -> getAttributeValueList(result, attrEmployeeType).stream()
+                        .forEach(v -> modifyDeleteEntry(modifyList, attrEmployeeType, v)));
+        final String attrFacsimileTelephoneNumber = fessConfig.getLdapAttrFacsimileTelephoneNumber();
+        OptionalUtil.ofNullable(user.getFacsimileTelephoneNumber())
+                .filter(StringUtil::isNotBlank)
+                .ifPresent(s -> modifyReplaceEntry(modifyList, attrFacsimileTelephoneNumber, s))
+                .orElse(() -> getAttributeValueList(result, attrFacsimileTelephoneNumber).stream()
+                        .forEach(v -> modifyDeleteEntry(modifyList, attrFacsimileTelephoneNumber, v)));
+        final String attrPostOfficeBox = fessConfig.getLdapAttrPostOfficeBox();
+        OptionalUtil.ofNullable(user.getPostOfficeBox())
+                .filter(StringUtil::isNotBlank)
+                .ifPresent(s -> modifyReplaceEntry(modifyList, attrPostOfficeBox, s))
+                .orElse(() -> getAttributeValueList(result, attrPostOfficeBox).stream()
+                        .forEach(v -> modifyDeleteEntry(modifyList, attrPostOfficeBox, v)));
+        final String attrInitials = fessConfig.getLdapAttrInitials();
+        OptionalUtil.ofNullable(user.getInitials())
+                .filter(StringUtil::isNotBlank)
+                .ifPresent(s -> modifyReplaceEntry(modifyList, attrInitials, s))
+                .orElse(() -> getAttributeValueList(result, attrInitials).stream()
+                        .forEach(v -> modifyDeleteEntry(modifyList, attrInitials, v)));
+        final String attrCarLicense = fessConfig.getLdapAttrCarLicense();
+        OptionalUtil.ofNullable(user.getCarLicense())
+                .filter(StringUtil::isNotBlank)
+                .ifPresent(s -> modifyReplaceEntry(modifyList, attrCarLicense, s))
+                .orElse(() -> getAttributeValueList(result, attrCarLicense).stream()
+                        .forEach(v -> modifyDeleteEntry(modifyList, attrCarLicense, v)));
+        final String attrMobile = fessConfig.getLdapAttrMobile();
+        OptionalUtil.ofNullable(user.getMobile())
+                .filter(StringUtil::isNotBlank)
+                .ifPresent(s -> modifyReplaceEntry(modifyList, attrMobile, s))
+                .orElse(() -> getAttributeValueList(result, attrMobile).stream()
+                        .forEach(v -> modifyDeleteEntry(modifyList, attrMobile, v)));
+        final String attrPostalAddress = fessConfig.getLdapAttrPostalAddress();
+        OptionalUtil.ofNullable(user.getPostalAddress())
+                .filter(StringUtil::isNotBlank)
+                .ifPresent(s -> modifyReplaceEntry(modifyList, attrPostalAddress, s))
+                .orElse(() -> getAttributeValueList(result, attrPostalAddress).stream()
+                        .forEach(v -> modifyDeleteEntry(modifyList, attrPostalAddress, v)));
+        final String attrCity = fessConfig.getLdapAttrCity();
+        OptionalUtil.ofNullable(user.getCity())
+                .filter(StringUtil::isNotBlank)
+                .ifPresent(s -> modifyReplaceEntry(modifyList, attrCity, s))
+                .orElse(() -> getAttributeValueList(result, attrCity).stream().forEach(v -> modifyDeleteEntry(modifyList, attrCity, v)));
+        final String attrTeletexTerminalIdentifier = fessConfig.getLdapAttrTeletexTerminalIdentifier();
+        OptionalUtil.ofNullable(user.getTeletexTerminalIdentifier())
+                .filter(StringUtil::isNotBlank)
+                .ifPresent(s -> modifyReplaceEntry(modifyList, attrTeletexTerminalIdentifier, s))
+                .orElse(() -> getAttributeValueList(result, attrTeletexTerminalIdentifier).stream()
+                        .forEach(v -> modifyDeleteEntry(modifyList, attrTeletexTerminalIdentifier, v)));
+        final String attrX121Address = fessConfig.getLdapAttrX121Address();
+        OptionalUtil.ofNullable(user.getX121Address())
+                .filter(StringUtil::isNotBlank)
+                .ifPresent(s -> modifyReplaceEntry(modifyList, attrX121Address, s))
+                .orElse(() -> getAttributeValueList(result, attrX121Address).stream()
+                        .forEach(v -> modifyDeleteEntry(modifyList, attrX121Address, v)));
+        final String attrBusinessCategory = fessConfig.getLdapAttrBusinessCategory();
+        OptionalUtil.ofNullable(user.getBusinessCategory())
+                .filter(StringUtil::isNotBlank)
+                .ifPresent(s -> modifyReplaceEntry(modifyList, attrBusinessCategory, s))
+                .orElse(() -> getAttributeValueList(result, attrBusinessCategory).stream()
+                        .forEach(v -> modifyDeleteEntry(modifyList, attrBusinessCategory, v)));
+        final String attrRegisteredAddress = fessConfig.getLdapAttrRegisteredAddress();
+        OptionalUtil.ofNullable(user.getRegisteredAddress())
+                .filter(StringUtil::isNotBlank)
+                .ifPresent(s -> modifyReplaceEntry(modifyList, attrRegisteredAddress, s))
+                .orElse(() -> getAttributeValueList(result, attrRegisteredAddress).stream()
+                        .forEach(v -> modifyDeleteEntry(modifyList, attrRegisteredAddress, v)));
+        final String attrDisplayName = fessConfig.getLdapAttrDisplayName();
+        OptionalUtil.ofNullable(user.getDisplayName())
+                .filter(StringUtil::isNotBlank)
+                .ifPresent(s -> modifyReplaceEntry(modifyList, attrDisplayName, s))
+                .orElse(() -> getAttributeValueList(result, attrDisplayName).stream()
+                        .forEach(v -> modifyDeleteEntry(modifyList, attrDisplayName, v)));
+        final String attrPreferredLanguage = fessConfig.getLdapAttrPreferredLanguage();
+        OptionalUtil.ofNullable(user.getPreferredLanguage())
+                .filter(StringUtil::isNotBlank)
+                .ifPresent(s -> modifyReplaceEntry(modifyList, attrPreferredLanguage, s))
+                .orElse(() -> getAttributeValueList(result, attrPreferredLanguage).stream()
+                        .forEach(v -> modifyDeleteEntry(modifyList, attrPreferredLanguage, v)));
+        final String attrDepartmentNumber = fessConfig.getLdapAttrDepartmentNumber();
+        OptionalUtil.ofNullable(user.getDepartmentNumber())
+                .filter(StringUtil::isNotBlank)
+                .ifPresent(s -> modifyReplaceEntry(modifyList, attrDepartmentNumber, s))
+                .orElse(() -> getAttributeValueList(result, attrDepartmentNumber).stream()
+                        .forEach(v -> modifyDeleteEntry(modifyList, attrDepartmentNumber, v)));
+        final String attrUidNumber = fessConfig.getLdapAttrUidNumber();
+        OptionalUtil.ofNullable(user.getUidNumber())
+                .filter(s -> StringUtil.isNotBlank(s.toString()))
+                .ifPresent(s -> modifyReplaceEntry(modifyList, attrUidNumber, s.toString()))
+                .orElse(() -> getAttributeValueList(result, attrUidNumber).stream()
+                        .forEach(v -> modifyDeleteEntry(modifyList, attrUidNumber, v)));
+        final String attrGidNumber = fessConfig.getLdapAttrGidNumber();
+        OptionalUtil.ofNullable(user.getGidNumber())
+                .filter(s -> StringUtil.isNotBlank(s.toString()))
+                .ifPresent(s -> modifyReplaceEntry(modifyList, attrGidNumber, s.toString()))
+                .orElse(() -> getAttributeValueList(result, attrGidNumber).stream()
+                        .forEach(v -> modifyDeleteEntry(modifyList, attrGidNumber, v)));
+        final String attrHomeDirectory = fessConfig.getLdapAttrHomeDirectory();
+        OptionalUtil.ofNullable(user.getHomeDirectory())
+                .filter(StringUtil::isNotBlank)
+                .ifPresent(s -> modifyReplaceEntry(modifyList, attrHomeDirectory, s))
+                .orElse(() -> getAttributeValueList(result, attrHomeDirectory).stream()
+                        .forEach(v -> modifyDeleteEntry(modifyList, attrHomeDirectory, v)));
+
+        modify(userDN, modifyList, adminEnv);
+    }
+
+    /**
+     * Adds user attributes to the LDAP entry for user creation.
+     *
+     * @param entry the BasicAttributes to add user attributes to
+     * @param user the user object containing attribute values
+     */
+    protected void addUserAttributes(final BasicAttributes entry, final User user) {
+        entry.put(new BasicAttribute("cn", user.getName()));
+        entry.put(new BasicAttribute("userPassword", user.getOriginalPassword()));
+
+        OptionalUtil.ofNullable(user.getSurname())
+                .filter(StringUtil::isNotBlank)
+                .ifPresent(s -> entry.put(new BasicAttribute(fessConfig.getLdapAttrSurname(), s)));
+        OptionalUtil.ofNullable(user.getGivenName())
+                .filter(StringUtil::isNotBlank)
+                .ifPresent(s -> entry.put(new BasicAttribute(fessConfig.getLdapAttrGivenName(), s)));
+        OptionalUtil.ofNullable(user.getMail())
+                .filter(StringUtil::isNotBlank)
+                .ifPresent(s -> entry.put(new BasicAttribute(fessConfig.getLdapAttrMail(), s)));
+        OptionalUtil.ofNullable(user.getEmployeeNumber())
+                .filter(StringUtil::isNotBlank)
+                .ifPresent(s -> entry.put(new BasicAttribute(fessConfig.getLdapAttrEmployeeNumber(), s)));
+        OptionalUtil.ofNullable(user.getTelephoneNumber())
+                .filter(StringUtil::isNotBlank)
+                .ifPresent(s -> entry.put(new BasicAttribute(fessConfig.getLdapAttrTelephoneNumber(), s)));
+        OptionalUtil.ofNullable(user.getHomePhone())
+                .filter(StringUtil::isNotBlank)
+                .ifPresent(s -> entry.put(new BasicAttribute(fessConfig.getLdapAttrHomePhone(), s)));
+        OptionalUtil.ofNullable(user.getHomePostalAddress())
+                .filter(StringUtil::isNotBlank)
+                .ifPresent(s -> entry.put(new BasicAttribute(fessConfig.getLdapAttrHomePostalAddress(), s)));
+        OptionalUtil.ofNullable(user.getLabeledURI())
+                .filter(StringUtil::isNotBlank)
+                .ifPresent(s -> entry.put(new BasicAttribute(fessConfig.getLdapAttrLabeledURI(), s)));
+        OptionalUtil.ofNullable(user.getRoomNumber())
+                .filter(StringUtil::isNotBlank)
+                .ifPresent(s -> entry.put(new BasicAttribute(fessConfig.getLdapAttrRoomNumber(), s)));
+        OptionalUtil.ofNullable(user.getDescription())
+                .filter(StringUtil::isNotBlank)
+                .ifPresent(s -> entry.put(new BasicAttribute(fessConfig.getLdapAttrDescription(), s)));
+        OptionalUtil.ofNullable(user.getTitle())
+                .filter(StringUtil::isNotBlank)
+                .ifPresent(s -> entry.put(new BasicAttribute(fessConfig.getLdapAttrTitle(), s)));
+        OptionalUtil.ofNullable(user.getPager())
+                .filter(StringUtil::isNotBlank)
+                .ifPresent(s -> entry.put(new BasicAttribute(fessConfig.getLdapAttrPager(), s)));
+        OptionalUtil.ofNullable(user.getStreet())
+                .filter(StringUtil::isNotBlank)
+                .ifPresent(s -> entry.put(new BasicAttribute(fessConfig.getLdapAttrStreet(), s)));
+        OptionalUtil.ofNullable(user.getPostalCode())
+                .filter(StringUtil::isNotBlank)
+                .ifPresent(s -> entry.put(new BasicAttribute(fessConfig.getLdapAttrPostalCode(), s)));
+        OptionalUtil.ofNullable(user.getPhysicalDeliveryOfficeName())
+                .filter(StringUtil::isNotBlank)
+                .ifPresent(s -> entry.put(new BasicAttribute(fessConfig.getLdapAttrPhysicalDeliveryOfficeName(), s)));
+        OptionalUtil.ofNullable(user.getDestinationIndicator())
+                .filter(StringUtil::isNotBlank)
+                .ifPresent(s -> entry.put(new BasicAttribute(fessConfig.getLdapAttrDestinationIndicator(), s)));
+        OptionalUtil.ofNullable(user.getInternationaliSDNNumber())
+                .filter(StringUtil::isNotBlank)
+                .ifPresent(s -> entry.put(new BasicAttribute(fessConfig.getLdapAttrInternationaliSDNNumber(), s)));
+        OptionalUtil.ofNullable(user.getState())
+                .filter(StringUtil::isNotBlank)
+                .ifPresent(s -> entry.put(new BasicAttribute(fessConfig.getLdapAttrState(), s)));
+        OptionalUtil.ofNullable(user.getEmployeeType())
+                .filter(StringUtil::isNotBlank)
+                .ifPresent(s -> entry.put(new BasicAttribute(fessConfig.getLdapAttrEmployeeType(), s)));
+        OptionalUtil.ofNullable(user.getFacsimileTelephoneNumber())
+                .filter(StringUtil::isNotBlank)
+                .ifPresent(s -> entry.put(new BasicAttribute(fessConfig.getLdapAttrFacsimileTelephoneNumber(), s)));
+        OptionalUtil.ofNullable(user.getPostOfficeBox())
+                .filter(StringUtil::isNotBlank)
+                .ifPresent(s -> entry.put(new BasicAttribute(fessConfig.getLdapAttrPostOfficeBox(), s)));
+        OptionalUtil.ofNullable(user.getInitials())
+                .filter(StringUtil::isNotBlank)
+                .ifPresent(s -> entry.put(new BasicAttribute(fessConfig.getLdapAttrInitials(), s)));
+        OptionalUtil.ofNullable(user.getCarLicense())
+                .filter(StringUtil::isNotBlank)
+                .ifPresent(s -> entry.put(new BasicAttribute(fessConfig.getLdapAttrCarLicense(), s)));
+        OptionalUtil.ofNullable(user.getMobile())
+                .filter(StringUtil::isNotBlank)
+                .ifPresent(s -> entry.put(new BasicAttribute(fessConfig.getLdapAttrMobile(), s)));
+        OptionalUtil.ofNullable(user.getPostalAddress())
+                .filter(StringUtil::isNotBlank)
+                .ifPresent(s -> entry.put(new BasicAttribute(fessConfig.getLdapAttrPostalAddress(), s)));
+        OptionalUtil.ofNullable(user.getCity())
+                .filter(StringUtil::isNotBlank)
+                .ifPresent(s -> entry.put(new BasicAttribute(fessConfig.getLdapAttrCity(), s)));
+        OptionalUtil.ofNullable(user.getTeletexTerminalIdentifier())
+                .filter(StringUtil::isNotBlank)
+                .ifPresent(s -> entry.put(new BasicAttribute(fessConfig.getLdapAttrTeletexTerminalIdentifier(), s)));
+        OptionalUtil.ofNullable(user.getX121Address())
+                .filter(StringUtil::isNotBlank)
+                .ifPresent(s -> entry.put(new BasicAttribute(fessConfig.getLdapAttrX121Address(), s)));
+        OptionalUtil.ofNullable(user.getBusinessCategory())
+                .filter(StringUtil::isNotBlank)
+                .ifPresent(s -> entry.put(new BasicAttribute(fessConfig.getLdapAttrBusinessCategory(), s)));
+        OptionalUtil.ofNullable(user.getRegisteredAddress())
+                .filter(StringUtil::isNotBlank)
+                .ifPresent(s -> entry.put(new BasicAttribute(fessConfig.getLdapAttrRegisteredAddress(), s)));
+        OptionalUtil.ofNullable(user.getDisplayName())
+                .filter(StringUtil::isNotBlank)
+                .ifPresent(s -> entry.put(new BasicAttribute(fessConfig.getLdapAttrDisplayName(), s)));
+        OptionalUtil.ofNullable(user.getPreferredLanguage())
+                .filter(StringUtil::isNotBlank)
+                .ifPresent(s -> entry.put(new BasicAttribute(fessConfig.getLdapAttrPreferredLanguage(), s)));
+        OptionalUtil.ofNullable(user.getDepartmentNumber())
+                .filter(StringUtil::isNotBlank)
+                .ifPresent(s -> entry.put(new BasicAttribute(fessConfig.getLdapAttrDepartmentNumber(), s)));
+        OptionalUtil.ofNullable(user.getUidNumber())
+                .filter(s -> StringUtil.isNotBlank(s.toString()))
+                .ifPresent(s -> entry.put(new BasicAttribute(fessConfig.getLdapAttrUidNumber(), s)));
+        OptionalUtil.ofNullable(user.getGidNumber())
+                .filter(s -> StringUtil.isNotBlank(s.toString()))
+                .ifPresent(s -> entry.put(new BasicAttribute(fessConfig.getLdapAttrGidNumber(), s)));
+        OptionalUtil.ofNullable(user.getHomeDirectory())
+                .filter(StringUtil::isNotBlank)
+                .ifPresent(s -> entry.put(new BasicAttribute(fessConfig.getLdapAttrHomeDirectory(), s)));
+    }
+
+    /**
+     * Validates user attributes for the specified type.
+     *
+     * @param type the class type to validate for
+     * @param attributes the map of attribute names to values
+     * @param consumer the consumer to handle validation errors
+     */
+    public void validateUserAttributes(final Class<?> type, final Map<String, String> attributes, final Consumer<String> consumer) {
+        if (type == Long.class) {
+            // Long type attributes
+            final String attrUidNumber = fessConfig.getLdapAttrUidNumber();
+            final String attrGidNumber = fessConfig.getLdapAttrGidNumber();
+
+            Stream.of(attrUidNumber, attrGidNumber)
+                    .forEach(attrName -> OptionalUtil.ofNullable(attributes.get(attrName)).filter(StringUtil::isNotBlank).ifPresent(s -> {
+                        try {
+                            DfTypeUtil.toLong(s);
+                        } catch (final NumberFormatException e) {
+                            consumer.accept(attrName);
+                        }
+                    }));
+        } else {
+            // do nothing
+        }
+    }
+
+    /**
+     * Deletes a user from the LDAP directory.
+     *
+     * @param user the user object to delete
+     */
+    public void delete(final User user) {
+        if (!fessConfig.isLdapAdminEnabled(user.getName())) {
+            return;
+        }
+
+        final Supplier<Hashtable<String, String>> adminEnv = this::createAdminEnv;
+        final String userDN = fessConfig.getLdapAdminUserSecurityPrincipal(user.getName());
+
+        stream(user.getGroupNames()).of(stream -> stream.forEach(name -> {
+            search(fessConfig.getLdapAdminGroupBaseDn(), fessConfig.getLdapAdminGroupFilter(name), null, adminEnv, subResult -> {
+                if (subResult.isEmpty()) {
+                    final Group group = new Group();
+                    group.setName(name);
+                    insert(group);
+                }
+                final List<ModificationItem> modifyList = new ArrayList<>();
+                modifyDeleteEntry(modifyList, "member", userDN);
+                modify(fessConfig.getLdapAdminGroupSecurityPrincipal(name), modifyList, adminEnv);
+            });
+        }));
+        stream(user.getRoleNames()).of(stream -> stream.forEach(name -> {
+            search(fessConfig.getLdapAdminRoleBaseDn(), fessConfig.getLdapAdminRoleFilter(name), null, adminEnv, subResult -> {
+                if (subResult.isEmpty()) {
+                    final Role role = new Role();
+                    role.setName(name);
+                    insert(role);
+                }
+                final List<ModificationItem> modifyList = new ArrayList<>();
+                modifyDeleteEntry(modifyList, "member", userDN);
+                modify(fessConfig.getLdapAdminRoleSecurityPrincipal(name), modifyList, adminEnv);
+            });
+        }));
+
+        search(fessConfig.getLdapAdminUserBaseDn(), fessConfig.getLdapAdminUserFilter(user.getName()), null, adminEnv, result -> {
+            if (!result.isEmpty()) {
+                delete(userDN, adminEnv);
+            } else {
+                logger.info("User does not exist in LDAP server: name={}", user.getName());
+            }
+        });
+
+    }
+
+    /**
+     * Inserts or updates a role in the LDAP directory.
+     *
+     * @param role the role object to insert or update
+     */
+    public void insert(final Role role) {
+        if (!fessConfig.isLdapAdminEnabled()) {
+            return;
+        }
+
+        final Supplier<Hashtable<String, String>> adminEnv = this::createAdminEnv;
+        search(fessConfig.getLdapAdminRoleBaseDn(), fessConfig.getLdapAdminRoleFilter(role.getName()), null, adminEnv, result -> {
+            if (!result.isEmpty()) {
+                logger.info("Role already exists in LDAP server: name={}", role.getName());
+            } else {
+                final String entryDN = fessConfig.getLdapAdminRoleSecurityPrincipal(role.getName());
+                final BasicAttributes entry = new BasicAttributes();
+                addRoleAttributes(entry, role);
+                final Attribute oc = fessConfig.getLdapAdminRoleObjectClassAttribute();
+                entry.put(oc);
+                insert(entryDN, entry, adminEnv);
+            }
+        });
+
+    }
+
+    /**
+     * Adds role attributes to the LDAP entry for role creation.
+     *
+     * @param entry the BasicAttributes to add role attributes to
+     * @param user the role object containing attribute values
+     */
+    protected void addRoleAttributes(final BasicAttributes entry, final Role user) {
+        // nothing
+    }
+
+    /**
+     * Deletes a role from the LDAP directory.
+     *
+     * @param role the role object to delete
+     */
+    public void delete(final Role role) {
+        if (!fessConfig.isLdapAdminEnabled()) {
+            return;
+        }
+
+        final Supplier<Hashtable<String, String>> adminEnv = this::createAdminEnv;
+        search(fessConfig.getLdapAdminRoleBaseDn(), fessConfig.getLdapAdminRoleFilter(role.getName()), null, adminEnv, result -> {
+            if (!result.isEmpty()) {
+                final String entryDN = fessConfig.getLdapAdminRoleSecurityPrincipal(role.getName());
+                delete(entryDN, adminEnv);
+            } else {
+                logger.info("Role does not exist in LDAP server: name={}", role.getName());
+            }
+        });
+
+    }
+
+    /**
+     * Applies LDAP attributes to a group object.
+     *
+     * @param group the group object to populate with LDAP attributes
+     */
+    public void apply(final Group group) {
+        if (!fessConfig.isLdapAdminEnabled()) {
+            return;
+        }
+
+        final Supplier<Hashtable<String, String>> adminEnv = this::createAdminEnv;
+        search(fessConfig.getLdapAdminGroupBaseDn(), fessConfig.getLdapAdminGroupFilter(group.getName()), null, adminEnv, result -> {
+            if (!result.isEmpty()) {
+                setAttributeValue(result, fessConfig.getLdapAttrGidNumber(), o -> group.setGidNumber(DfTypeUtil.toLong(o)));
+            }
+        });
+    }
+
+    /**
+     * Inserts or updates a group in the LDAP directory.
+     *
+     * @param group the group object to insert or update
+     */
+    public void insert(final Group group) {
+        if (!fessConfig.isLdapAdminEnabled()) {
+            return;
+        }
+
+        final Supplier<Hashtable<String, String>> adminEnv = this::createAdminEnv;
+        final String entryDN = fessConfig.getLdapAdminGroupSecurityPrincipal(group.getName());
+        search(fessConfig.getLdapAdminGroupBaseDn(), fessConfig.getLdapAdminGroupFilter(group.getName()), null, adminEnv, result -> {
+            if (!result.isEmpty()) {
+                logger.info("Group already exists in LDAP server: name={}", group.getName());
+                modifyGroupAttributes(group, adminEnv, entryDN, result);
+            } else {
+                final BasicAttributes entry = new BasicAttributes();
+                addGroupAttributes(entry, group);
+                final Attribute oc = fessConfig.getLdapAdminGroupObjectClassAttribute();
+                entry.put(oc);
+                insert(entryDN, entry, adminEnv);
+            }
+        });
+    }
+
+    /**
+     * Modifies group attributes in the LDAP directory.
+     *
+     * @param group the group object with new attribute values
+     * @param adminEnv the supplier for admin environment
+     * @param entryDN the DN of the group entry
+     * @param result the search results containing current attributes
+     */
+    protected void modifyGroupAttributes(final Group group, final Supplier<Hashtable<String, String>> adminEnv, final String entryDN,
+            final List<SearchResult> result) {
+        final List<ModificationItem> modifyList = new ArrayList<>();
+
+        final String attrGidNumber = fessConfig.getLdapAttrGidNumber();
+        OptionalUtil.ofNullable(group.getGidNumber())
+                .filter(s -> StringUtil.isNotBlank(s.toString()))
+                .ifPresent(s -> modifyReplaceEntry(modifyList, attrGidNumber, s.toString()))
+                .orElse(() -> getAttributeValueList(result, attrGidNumber).stream()
+                        .forEach(v -> modifyDeleteEntry(modifyList, attrGidNumber, v)));
+
+        modify(entryDN, modifyList, adminEnv);
+    }
+
+    /**
+     * Adds group attributes to the LDAP entry for group creation.
+     *
+     * @param entry the BasicAttributes to add group attributes to
+     * @param group the group object containing attribute values
+     */
+    protected void addGroupAttributes(final BasicAttributes entry, final Group group) {
+        OptionalUtil.ofNullable(group.getGidNumber())
+                .filter(s -> StringUtil.isNotBlank(s.toString()))
+                .ifPresent(s -> entry.put(new BasicAttribute(fessConfig.getLdapAttrGidNumber(), s)));
+    }
+
+    /**
+     * Validates group attributes for the specified type.
+     *
+     * @param type the class type to validate for
+     * @param attributes the map of attribute names to values
+     * @param consumer the consumer to handle validation errors
+     */
+    public void validateGroupAttributes(final Class<?> type, final Map<String, String> attributes, final Consumer<String> consumer) {
+        if (type == Long.class) {
+            // Long type attributes
+            final String attrGidNumber = fessConfig.getLdapAttrGidNumber();
+
+            Stream.of(attrGidNumber)
+                    .forEach(attrName -> OptionalUtil.ofNullable(attributes.get(attrName)).filter(StringUtil::isNotBlank).ifPresent(s -> {
+                        try {
+                            DfTypeUtil.toLong(s);
+                        } catch (final NumberFormatException e) {
+                            consumer.accept(attrName);
+                        }
+                    }));
+        } else {
+            // do nothing
+        }
+    }
+
+    /**
+     * Deletes a group from the LDAP directory.
+     *
+     * @param group the group object to delete
+     */
+    public void delete(final Group group) {
+        if (!fessConfig.isLdapAdminEnabled()) {
+            return;
+        }
+
+        final Supplier<Hashtable<String, String>> adminEnv = this::createAdminEnv;
+        search(fessConfig.getLdapAdminGroupBaseDn(), fessConfig.getLdapAdminGroupFilter(group.getName()), null, adminEnv, result -> {
+            if (!result.isEmpty()) {
+                final String entryDN = fessConfig.getLdapAdminGroupSecurityPrincipal(group.getName());
+                delete(entryDN, adminEnv);
+            } else {
+                logger.info("Group does not exist in LDAP server: name={}", group.getName());
+            }
+        });
+    }
+
+    /**
+     * Changes the password for a user in the LDAP directory.
+     *
+     * <p>This method performs the following validations:
+     * <ul>
+     * <li>Checks if username and password are not blank</li>
+     * <li>Verifies LDAP admin is enabled for the user</li>
+     * <li>Confirms the user exists in LDAP directory</li>
+     * </ul>
+     *
+     * @param username the username of the user (must not be null or blank)
+     * @param password the new password (must not be null or blank)
+     * @return true if the password was changed successfully, false otherwise
+     * @throws LdapOperationException if the user is not found in LDAP
+     */
+    public boolean changePassword(final String username, final String password) {
+        // Add defensive null/blank checks
+        if (StringUtil.isBlank(username) || StringUtil.isBlank(password)) {
+            logger.warn("Cannot change password: username or password is blank");
+            return false;
+        }
+
+        if (!fessConfig.isLdapAdminEnabled(username)) {
+            if (logger.isDebugEnabled()) {
+                logger.debug("LDAP admin not enabled for user: {}", username);
+            }
+            return false;
+        }
+
+        try {
+            final Supplier<Hashtable<String, String>> adminEnv = this::createAdminEnv;
+            final String userDN = fessConfig.getLdapAdminUserSecurityPrincipal(username);
+            search(fessConfig.getLdapAdminUserBaseDn(), fessConfig.getLdapAdminUserFilter(username), null, adminEnv, result -> {
+                if (result.isEmpty()) {
+                    throw new LdapOperationException("User is not found: " + username);
+                }
+                final List<ModificationItem> modifyList = new ArrayList<>();
+                modifyReplaceEntry(modifyList, "userPassword", password);
+                modify(userDN, modifyList, adminEnv);
+            });
+            return true;
+        } catch (final LdapOperationException e) {
+            logger.warn("Failed to change password for user: {}", username, e);
+            throw e;
+        } catch (final Exception e) {
+            logger.warn("Unexpected error while changing password for user: {}", username, e);
+            return false;
+        }
+    }
+
+    /**
+     * Inserts a new entry into the LDAP directory.
+     *
+     * @param entryDN the DN of the entry to insert
+     * @param entry the attributes of the entry
+     * @param envSupplier the supplier for environment configuration
+     */
+    protected void insert(final String entryDN, final Attributes entry, final Supplier<Hashtable<String, String>> envSupplier) {
+        try (DirContextHolder holder = getDirContext(envSupplier)) {
+            logger.debug("Inserting LDAP entry: dn={}", entryDN);
+            holder.get().createSubcontext(entryDN, entry);
+        } catch (final NamingException e) {
+            throw new LdapOperationException("Failed to add " + entryDN, e);
+        }
+    }
+
+    /**
+     * Deletes an entry from the LDAP directory.
+     *
+     * @param entryDN the DN of the entry to delete
+     * @param envSupplier the supplier for environment configuration
+     */
+    protected void delete(final String entryDN, final Supplier<Hashtable<String, String>> envSupplier) {
+        try (DirContextHolder holder = getDirContext(envSupplier)) {
+            logger.debug("Deleting LDAP entry: dn={}", entryDN);
+            holder.get().destroySubcontext(entryDN);
+        } catch (final NamingException e) {
+            throw new LdapOperationException("Failed to delete " + entryDN, e);
+        }
+    }
+
+    /**
+     * Searches the LDAP directory with the specified parameters.
+     *
+     * @param baseDn the base DN for the search
+     * @param filter the search filter
+     * @param returningAttrs the attributes to return from the search
+     * @param envSupplier the supplier for environment configuration
+     * @param consumer the consumer to handle search results
+     */
+    protected void search(final String baseDn, final String filter, final String[] returningAttrs,
+            final Supplier<Hashtable<String, String>> envSupplier, final SearchConsumer consumer) {
+        try (DirContextHolder holder = getDirContext(envSupplier)) {
+            final SearchControls controls = createSearchControls(returningAttrs);
+
+            final SystemHelper systemHelper = ComponentUtil.getSystemHelper();
+            final long startTime = systemHelper.getCurrentTimeAsLong();
+            final List<SearchResult> list = Collections.list(holder.get().search(baseDn, filter, controls));
+            if (logger.isDebugEnabled()) {
+                logger.debug("LDAP search completed: time={}ms, baseDn={}, filter={}", systemHelper.getCurrentTimeAsLong() - startTime,
+                        baseDn, filter);
+            }
+            consumer.accept(list);
+        } catch (final NamingException e) {
+            if (isDirectoryUnavailable(e)) {
+                // The caller may run on a request thread and only report this at debug level, so surface the
+                // timeout here where the operation and the bounds that produced it are still known.
+                logger.warn("LDAP directory did not answer the search: baseDn={}, filter={}, readTimeout={}ms, timeLimit={}ms", baseDn,
+                        filter, getReadTimeout(), getSearchTimeLimit(), e);
+            }
+            throw new LdapOperationException("Failed to search " + baseDn + " with " + filter, e);
+        }
+    }
+
+    /**
+     * Creates the search controls used by every LDAP search, applying the configured search time limit.
+     *
+     * @param returningAttrs The attributes to return from the search, or null for all attributes.
+     * @return The search controls.
+     */
+    protected SearchControls createSearchControls(final String[] returningAttrs) {
+        final SearchControls controls = new SearchControls();
+        controls.setSearchScope(SearchControls.SUBTREE_SCOPE);
+        if (returningAttrs != null) {
+            controls.setReturningAttributes(returningAttrs);
+        }
+        final int timeLimit = getSearchTimeLimit();
+        if (timeLimit > 0) {
+            // SearchControls already defaults to 0, which is its own contract for "no limit".
+            controls.setTimeLimit(timeLimit);
+        }
+        return controls;
+    }
+
+    /**
+     * Determines whether the given exception means the directory did not answer. The JDK LDAP provider
+     * reports both a connect timeout and a read timeout as a {@link CommunicationException} (the read timeout
+     * carries a "LDAP response read timed out" cause), and the server side time limit as a
+     * {@link TimeLimitExceededException}. A {@link CommunicationException} also covers a connection that failed
+     * outright, which is equally worth reporting to an operator.
+     *
+     * @param e The naming exception.
+     * @return True if the directory did not answer.
+     */
+    protected boolean isDirectoryUnavailable(final NamingException e) {
+        return e instanceof CommunicationException || e instanceof TimeLimitExceededException;
+    }
+
+    /**
+     * Modifies an entry by adding a new attribute.
+     *
+     * @param modifyList The list of modification items.
+     * @param name The name of the attribute.
+     * @param value The value of the attribute.
+     */
+    protected void modifyAddEntry(final List<ModificationItem> modifyList, final String name, final String value) {
+        final Attribute attr = new BasicAttribute(name, value);
+        final ModificationItem mod = new ModificationItem(DirContext.ADD_ATTRIBUTE, attr);
+        modifyList.add(mod);
+    }
+
+    /**
+     * Modifies an entry by replacing an attribute.
+     *
+     * @param modifyList The list of modification items.
+     * @param name The name of the attribute.
+     * @param value The value of the attribute.
+     */
+    protected void modifyReplaceEntry(final List<ModificationItem> modifyList, final String name, final String value) {
+        final Attribute attr = new BasicAttribute(name, value);
+        final ModificationItem mod = new ModificationItem(DirContext.REPLACE_ATTRIBUTE, attr);
+        modifyList.add(mod);
+    }
+
+    /**
+     * Modifies an entry by deleting an attribute.
+     *
+     * @param modifyList The list of modification items.
+     * @param name The name of the attribute.
+     * @param value The value of the attribute.
+     */
+    protected void modifyDeleteEntry(final List<ModificationItem> modifyList, final String name, final Object value) {
+        final Attribute attr = new BasicAttribute(name, value);
+        final ModificationItem mod = new ModificationItem(DirContext.REMOVE_ATTRIBUTE, attr);
+        modifyList.add(mod);
+    }
+
+    /**
+     * Modifies an entry.
+     *
+     * @param dn The DN of the entry.
+     * @param modifyList The list of modification items.
+     * @param envSupplier The environment supplier.
+     */
+    protected void modify(final String dn, final List<ModificationItem> modifyList, final Supplier<Hashtable<String, String>> envSupplier) {
+        if (modifyList.isEmpty()) {
+            return;
+        }
+        try (DirContextHolder holder = getDirContext(envSupplier)) {
+            holder.get().modifyAttributes(dn, modifyList.toArray(new ModificationItem[modifyList.size()]));
+        } catch (final NamingException e) {
+            throw new LdapOperationException("Failed to search " + dn, e);
+        }
+    }
+
+    /**
+     * An interface for consuming search results.
+     */
+    interface SearchConsumer {
+        /**
+         * Accepts a list of search results.
+         *
+         * @param t The list of search results.
+         * @throws NamingException If a naming exception occurs.
+         */
+        void accept(List<SearchResult> t) throws NamingException;
+    }
+
+    /**
+     * Gets the directory context.
+     *
+     * @param envSupplier The environment supplier.
+     * @return The directory context holder.
+     */
+    protected DirContextHolder getDirContext(final Supplier<Hashtable<String, String>> envSupplier) {
+        DirContextHolder holder = contextLocal.get();
+        if (holder != null) {
+            holder.inc();
+            return holder;
+        }
+        final Hashtable<String, String> env = envSupplier.get();
+        try {
+            holder = new DirContextHolder(new InitialDirContext(env));
+            contextLocal.set(holder);
+            return holder;
+        } catch (final NamingException e) {
+            // The provider URL is the only part of env that is safe to report; the rest holds credentials.
+            throw new LdapOperationException(
+                    "Failed to create DirContext: url=" + env.get(Context.PROVIDER_URL) + ", connectTimeout=" + getConnectTimeout() + "ms",
+                    e);
+        }
+    }
+
+    /**
+     * A holder for the directory context.
+     */
+    protected class DirContextHolder implements AutoCloseable {
+        private final DirContext context;
+
+        private int counter = 1;
+
+        /**
+         * Constructs a new directory context holder.
+         *
+         * @param context The directory context.
+         */
+        protected DirContextHolder(final DirContext context) {
+            this.context = context;
+        }
+
+        /**
+         * Returns the directory context.
+         *
+         * @return The directory context.
+         */
+        public DirContext get() {
+            return context;
+        }
+
+        /**
+         * Increments the counter.
+         */
+        public void inc() {
+            counter++;
+        }
+
+        @Override
+        public void close() {
+            if (counter > 1) {
+                counter--;
+            } else {
+                try {
+                    if (context != null) {
+                        try {
+                            context.close();
+                        } catch (final NamingException e) {
+                            if (logger.isDebugEnabled()) {
+                                logger.debug("Failed to close LDAP context", e);
+                            }
+                        }
+                    }
+                } finally {
+                    // Ensure ThreadLocal is always cleaned up, even if context.close() fails
+                    contextLocal.remove();
+                }
+            }
+        }
+    }
+}

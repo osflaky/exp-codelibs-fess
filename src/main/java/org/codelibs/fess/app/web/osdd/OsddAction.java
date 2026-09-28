@@ -1,0 +1,66 @@
+/*
+ * Copyright 2012-2025 CodeLibs Project and the Others.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND,
+ * either express or implied. See the License for the specific language
+ * governing permissions and limitations under the License.
+ */
+package org.codelibs.fess.app.web.osdd;
+
+import org.codelibs.fess.app.web.base.FessSearchAction;
+import org.lastaflute.web.Execute;
+import org.lastaflute.web.response.ActionResponse;
+
+/**
+ * OSDD (OpenSearch Description Document) action.
+ *
+ * @deprecated Kept for compatibility with existing clients and themes that link it; slated for
+ *             removal in a later release.
+ */
+@Deprecated(since = "15.9")
+public class OsddAction extends FessSearchAction {
+
+    /**
+     * Default constructor.
+     */
+    public OsddAction() {
+    }
+
+    // ===================================================================================
+    //                                                                            Constant
+    //
+
+    // ===================================================================================
+    //                                                                           Attribute
+    //
+
+    // ===================================================================================
+    //                                                                               Hook
+    //                                                                              ======
+
+    // ===================================================================================
+    //                                                                      Search Execute
+    //                                                                      ==============
+
+    /**
+     * Returns the OSDD document.
+     *
+     * @return the OSDD document as a stream response
+     */
+    @Execute
+    public ActionResponse index() {
+        if (isLoginRequired()) {
+            return redirectToLogin();
+        }
+        return osddHelper.asStream();
+    }
+
+}

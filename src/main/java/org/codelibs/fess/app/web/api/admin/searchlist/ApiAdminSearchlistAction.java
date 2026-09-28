@@ -1,0 +1,333 @@
+/*
+ * Copyright 2012-2025 CodeLibs Project and the Others.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND,
+ * either express or implied. See the License for the specific language
+ * governing permissions and limitations under the License.
+ */
+package org.codelibs.fess.app.web.api.admin.searchlist;
+
+import static org.codelibs.fess.app.web.admin.searchlist.AdminSearchlistAction.getDoc;
+import static org.codelibs.fess.app.web.admin.searchlist.AdminSearchlistAction.stripSystemManagedFields;
+import static org.codelibs.fess.app.web.admin.searchlist.AdminSearchlistAction.validateFields;
+
+import java.util.List;
+import java.util.Map;
+import java.util.function.Consumer;
+
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+import org.codelibs.core.lang.StringUtil;
+import org.codelibs.fess.Constants;
+import org.codelibs.fess.app.web.CrudMode;
+import org.codelibs.fess.app.web.api.ApiResult;
+import org.codelibs.fess.app.web.api.ApiResult.ApiDeleteResponse;
+import org.codelibs.fess.app.web.api.ApiResult.ApiDocResponse;
+import org.codelibs.fess.app.web.api.ApiResult.ApiDocsResponse;
+import org.codelibs.fess.app.web.api.ApiResult.ApiResponse;
+import org.codelibs.fess.app.web.api.ApiResult.ApiUpdateResponse;
+import org.codelibs.fess.app.web.api.ApiResult.Status;
+import org.codelibs.fess.app.web.api.admin.FessApiAdminAction;
+import org.codelibs.fess.entity.SearchRenderData;
+import org.codelibs.fess.exception.InvalidQueryException;
+import org.codelibs.fess.exception.ResultOffsetExceededException;
+import org.codelibs.fess.helper.SearchHelper;
+import org.codelibs.fess.opensearch.client.SearchEngineClient;
+import org.codelibs.fess.util.ComponentUtil;
+import org.lastaflute.web.Execute;
+import org.lastaflute.web.response.JsonResponse;
+import org.codelibs.fesen.opensearch.index.query.QueryBuilder;
+import org.codelibs.fesen.opensearch.index.query.QueryBuilders;
+
+import jakarta.annotation.Resource;
+
+/**
+ * API action for admin search list management.
+ *
+ */
+public class ApiAdminSearchlistAction extends FessApiAdminAction {
+
+    // ===================================================================================
+    // Constant
+    //
+    /** The logger for this class. */
+    private static final Logger logger = LogManager.getLogger(ApiAdminSearchlistAction.class);
+
+    // ===================================================================================
+    //                                                                         Constructor
+    //                                                                         ===========
+    /**
+     * Default constructor.
+     */
+    public ApiAdminSearchlistAction() {
+    }
+
+    // ===================================================================================
+    //                                                                           Attribute
+    //                                                                           =========
+
+    // ===================================================================================
+    // Attribute
+    // =========
+    /** The search helper for performing search operations. */
+    @Resource
+    protected SearchHelper searchHelper;
+
+    /** The search engine client for interacting with OpenSearch. */
+    @Resource
+    protected SearchEngineClient searchEngineClient;
+
+    // ===================================================================================
+    //                                                                      Search Execute
+    //                                                                      ==============
+
+    /**
+     * Searches for documents in the search index.
+     *
+     * @param body the search parameters for querying documents
+     * @return JSON response containing search results
+     */
+    // GET /api/admin/searchlist/docs
+    // PUT /api/admin/searchlist/docs
+    @Execute
+    public JsonResponse<ApiResult> docs(final SearchBody body) {
+        validateApi(body, messages -> {});
+
+        if (StringUtil.isBlank(body.q)) {
+            // query matches on all documents.
+            body.q = Constants.MATCHES_ALL_QUERY;
+        }
+
+        final SearchRenderData renderData = new SearchRenderData();
+        body.initialize();
+        try {
+            searchHelper.search(body, renderData, getUserBean());
+            return asJson(new ApiDocsResponse().renderData(renderData).status(Status.OK).result());
+        } catch (final InvalidQueryException e) {
+            if (logger.isDebugEnabled()) {
+                logger.debug("Invalid query: {}", body.q, e);
+            }
+            throwValidationErrorApi(e.getMessageCode());
+        } catch (final ResultOffsetExceededException e) {
+            if (logger.isDebugEnabled()) {
+                logger.debug("Invalid offset: {}", body.offset, e);
+            }
+            throwValidationErrorApi(messages -> messages.addErrorsResultSizeExceeded(GLOBAL));
+        }
+
+        throwValidationErrorApi(messages -> messages.addErrorsInvalidQueryUnknown(GLOBAL));
+        return null; // ignore
+    }
+
+    /**
+     * Retrieves a specific document by ID.
+     *
+     * @param id the document ID to retrieve
+     * @return JSON response containing the document
+     */
+    // GET /api/admin/searchlist/doc/{doc_id}
+    @Execute
+    public JsonResponse<ApiResult> get$doc(final String id) {
+        return asJson(new ApiDocResponse().doc(searchEngineClient.getDocument(fessConfig.getIndexDocumentUpdateIndex(), builder -> {
+            builder.setQuery(QueryBuilders.termQuery(fessConfig.getIndexFieldDocId(), id));
+            return true;
+        }).orElseGet(() -> {
+            throwValidationErrorApi(messages -> messages.addErrorsCrudCouldNotFindCrudTable(GLOBAL, id));
+            return null;
+        })).status(Status.OK).result());
+    }
+
+    /**
+     * Creates a new document in the search index.
+     *
+     * @param body the document data to create
+     * @return JSON response containing the created document ID
+     */
+    // POST /api/admin/searchlist/doc
+    @Execute
+    public JsonResponse<ApiResult> post$doc(final CreateBody body) {
+        validateApi(body, messages -> {});
+        if (body.doc == null) {
+            throwValidationErrorApi(messages -> messages.addErrorsCrudFailedToCreateCrudTable(GLOBAL, "doc is required"));
+        }
+        validateFields(body.doc, this::throwValidationErrorApi);
+        body.crudMode = CrudMode.CREATE;
+        final Map<String, Object> doc = getDoc(body).map(entity -> {
+            verifyContentNotChunkManaged(entity, body.doc,
+                    message -> throwValidationErrorApi(messages -> messages.addErrorsCrudFailedToCreateCrudTable(GLOBAL, message)));
+            try {
+                stripSystemManagedFields(entity, body.doc);
+                entity.putAll(fessConfig.convertToStorableDoc(body.doc));
+
+                final String newId = ComponentUtil.getCrawlingInfoHelper().generateId(entity);
+                entity.put(fessConfig.getIndexFieldId(), newId);
+
+                final String index = fessConfig.getIndexDocumentUpdateIndex();
+                searchEngineClient.store(index, entity);
+                saveInfo(messages -> messages.addSuccessCrudCreateCrudTable(GLOBAL));
+            } catch (final Exception e) {
+                logger.warn("Failed to add {}", entity, e);
+                throwValidationErrorApi(messages -> messages.addErrorsCrudFailedToCreateCrudTable(GLOBAL, buildThrowableMessage(e)));
+            }
+            return entity;
+        }).orElseGet(() -> {
+            throwValidationErrorApi(messages -> messages.addErrorsCrudFailedToCreateInstance(GLOBAL));
+            return null;
+        });
+        return asJson(
+                new ApiUpdateResponse().id(doc.get(fessConfig.getIndexFieldDocId()).toString()).created(true).status(Status.OK).result());
+    }
+
+    /**
+     * Updates an existing document in the search index.
+     *
+     * @param body the document data to update
+     * @return JSON response containing the updated document ID
+     */
+    // PUT /api/admin/searchlist/doc
+    @Execute
+    public JsonResponse<ApiResult> put$doc(final EditBody body) {
+        validateApi(body, messages -> {});
+        if (body.doc == null) {
+            throwValidationErrorApi(messages -> messages.addErrorsCrudFailedToCreateCrudTable(GLOBAL, "doc is required"));
+        }
+        validateFields(body.doc, this::throwValidationErrorApi);
+        body.crudMode = CrudMode.EDIT;
+        final Map<String, Object> doc = getDoc(body).map(entity -> {
+            final String index = fessConfig.getIndexDocumentUpdateIndex();
+            verifyContentNotChunkManaged(entity, body.doc,
+                    message -> throwValidationErrorApi(messages -> messages.addErrorsCrudFailedToUpdateCrudTable(GLOBAL, message)));
+            try {
+                stripSystemManagedFields(entity, body.doc);
+                entity.putAll(fessConfig.convertToStorableDoc(body.doc));
+
+                final String newId = ComponentUtil.getCrawlingInfoHelper().generateId(entity);
+                final String oldId = (String) entity.get(fessConfig.getIndexFieldId());
+                if (!newId.equals(oldId)) {
+                    entity.put(fessConfig.getIndexFieldId(), newId);
+                    entity.remove(fessConfig.getIndexFieldVersion());
+                    final Number seqNo = (Number) entity.remove(fessConfig.getIndexFieldSeqNo());
+                    final Number primaryTerm = (Number) entity.remove(fessConfig.getIndexFieldPrimaryTerm());
+                    if (seqNo != null && primaryTerm != null && oldId != null) {
+                        searchEngineClient.delete(index, oldId, seqNo, primaryTerm);
+                    }
+                }
+
+                searchEngineClient.store(index, entity);
+                saveInfo(messages -> messages.addSuccessCrudUpdateCrudTable(GLOBAL));
+            } catch (final Exception e) {
+                logger.warn("Failed to update {}", entity, e);
+                throwValidationErrorApi(messages -> messages.addErrorsCrudFailedToUpdateCrudTable(GLOBAL, buildThrowableMessage(e)));
+            }
+            return entity;
+        }).orElseGet(() -> {
+            throwValidationErrorApi(messages -> messages.addErrorsCrudCouldNotFindCrudTable(GLOBAL, body.doc.toString()));
+            return null;
+        });
+        return asJson(
+                new ApiUpdateResponse().id(doc.get(fessConfig.getIndexFieldDocId()).toString()).created(false).status(Status.OK).result());
+    }
+
+    /**
+     * Refuses a {@code content} update whose value {@code stripSystemManagedFields} would silently
+     * discard -- i.e. one aimed at an already-chunked document, whose fetched {@code content} is a
+     * {@code List} of chunks kept consistent with {@code content_chunk_vector} by the embedding
+     * pipeline.
+     *
+     * <p>Dropping the field is the right behavior for the HTML screen, which renders that document's
+     * {@code content} as a read-only chunk list and never submits it, so a {@code content} key can
+     * only arrive there by a hand-crafted POST. The API has no such rendering pass: a caller that
+     * sends {@code content} in good faith otherwise gets {@code status: 0} back with the field
+     * discarded and nothing -- no error, no warning, no log -- saying so. Failing the request keeps
+     * the write path honest; no legitimate API workflow can update chunked content anyway, since the
+     * chunk array and its vectors are only ever written together by the pipeline.</p>
+     *
+     * <p>The unconditional strip of {@code content_chunk_vector}/{@code content_chunk_status} stays
+     * silent: those keys are never a legitimate client-supplied value on either transport.</p>
+     *
+     * @param entity the freshly-fetched entity (read-only; only its {@code content} value is read)
+     * @param doc the client-supplied doc map (read-only here; not yet stripped)
+     * @param throwError callback invoked with the error detail when the update must be refused
+     */
+    protected void verifyContentNotChunkManaged(final Map<String, Object> entity, final Map<String, Object> doc,
+            final Consumer<String> throwError) {
+        if (entity == null || doc == null || !doc.containsKey("content")) {
+            return;
+        }
+        if (entity.get("content") instanceof List<?>) {
+            logger.warn("Rejected a content update for a chunked document. docId={}", entity.get(fessConfig.getIndexFieldDocId()));
+            throwError.accept("content is managed by the content chunk pipeline for this document and cannot be updated");
+        }
+    }
+
+    /**
+     * Deletes a document by ID from the search index.
+     *
+     * @param id the document ID to delete
+     * @return JSON response indicating success or failure
+     */
+    // DELETE /api/admin/searchlist/doc/{doc_id}
+    @Execute
+    public JsonResponse<ApiResult> delete$doc(final String id) {
+        final long count;
+        try {
+            final QueryBuilder query = QueryBuilders.termQuery(fessConfig.getIndexFieldDocId(), id);
+            count = searchEngineClient.deleteByQuery(fessConfig.getIndexDocumentUpdateIndex(), query);
+        } catch (final Exception e) {
+            logger.warn("Failed to process a request.", e);
+            throwValidationErrorApi(messages -> messages.addErrorsFailedToDeleteDocInAdmin(GLOBAL));
+            return null; // ignore
+        }
+        if (count == 0) {
+            // A query that matched nothing is a successful delete by query, so an id that is not
+            // a doc_id -- the _id the document list reports, for one -- used to be answered with
+            // status 0 while the document stayed in the index. Automation built on that could
+            // not tell a delete from a no-op.
+            logger.debug("No document was deleted: doc_id={}", id);
+            throwValidationErrorApi(messages -> messages.addErrorsCrudCouldNotFindCrudTable(GLOBAL, id));
+        }
+        saveInfo(messages -> messages.addSuccessDeleteDocFromIndex(GLOBAL));
+        return asJson(new ApiResponse().status(Status.OK).result());
+    }
+
+    /**
+     * Deletes documents matching the given query from the search index.
+     *
+     * @param body the search parameters defining which documents to delete
+     * @return JSON response containing the count of deleted documents
+     */
+    // DELETE /api/admin/searchlist/query
+    @Execute
+    public JsonResponse<ApiResult> delete$query(final SearchBody body) {
+        validateApi(body, messages -> {});
+
+        if (StringUtil.isBlank(body.q)) {
+            throwValidationErrorApi(messages -> messages.addErrorsInvalidQueryUnknown(GLOBAL));
+        }
+        try {
+            final long count = searchHelper.deleteByQuery(request, body);
+            return asJson(new ApiDeleteResponse().count(count).status(Status.OK).result());
+        } catch (final InvalidQueryException e) {
+            if (logger.isDebugEnabled()) {
+                logger.debug(e.getMessage(), e);
+            }
+            throwValidationErrorApi(e.getMessageCode());
+        } catch (final ResultOffsetExceededException e) {
+            if (logger.isDebugEnabled()) {
+                logger.debug(e.getMessage(), e);
+            }
+            throwValidationErrorApi(messages -> messages.addErrorsResultSizeExceeded(GLOBAL));
+        }
+
+        throwValidationErrorApi(messages -> messages.addErrorsInvalidQueryUnknown(GLOBAL));
+        return null; // ignore
+    }
+}

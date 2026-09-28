@@ -1,0 +1,1700 @@
+/*
+ * Copyright 2012-2025 CodeLibs Project and the Others.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND,
+ * either express or implied. See the License for the specific language
+ * governing permissions and limitations under the License.
+ */
+package org.codelibs.fess.job;
+
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+import org.codelibs.fess.mylasta.direction.FessConfig;
+import org.codelibs.fess.opensearch.client.SearchEngineClient;
+import org.codelibs.fess.unit.UnitFessTestCase;
+import org.codelibs.fess.util.BooleanFunction;
+import org.codelibs.fess.util.ComponentUtil;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInfo;
+import org.codelibs.fesen.opensearch.index.query.QueryBuilder;
+import org.codelibs.fesen.opensearch.index.query.QueryBuilders;
+
+public class IndexExportJobTest extends UnitFessTestCase {
+
+    private IndexExportJob indexExportJob;
+    private Path tempDir;
+
+    @Override
+    protected void setUp(TestInfo testInfo) throws Exception {
+        super.setUp(testInfo);
+        indexExportJob = new IndexExportJob();
+        tempDir = Files.createTempDirectory("indexExportJobTest");
+    }
+
+    @Override
+    protected void tearDown(TestInfo testInfo) throws Exception {
+        deleteRecursive(tempDir);
+        super.tearDown(testInfo);
+    }
+
+    private void deleteRecursive(final Path path) throws IOException {
+        if (Files.isDirectory(path)) {
+            Files.list(path).forEach(child -> {
+                try {
+                    deleteRecursive(child);
+                } catch (final IOException e) {
+                    // ignore
+                }
+            });
+        }
+        Files.deleteIfExists(path);
+    }
+
+    private void setupMockComponents(final List<Map<String, Object>> documents) {
+        final SearchEngineClient searchEngineClient = new SearchEngineClient() {
+            @Override
+            public long scrollSearch(final String index,
+                    final SearchCondition<org.codelibs.fesen.opensearch.action.search.SearchRequestBuilder> condition,
+                    final BooleanFunction<Map<String, Object>> cursor) {
+                long count = 0;
+                for (final Map<String, Object> doc : documents) {
+                    count++;
+                    if (!cursor.apply(doc)) {
+                        break;
+                    }
+                }
+                return count;
+            }
+        };
+
+        final FessConfig fessConfig = new TestFessConfig(tempDir.toString(), "cache", "100");
+        ComponentUtil.register(searchEngineClient, "searchEngineClient");
+        ComponentUtil.setFessConfig(fessConfig);
+    }
+
+    // --- query() tests ---
+
+    @Test
+    public void test_query_returnsThis() {
+        final IndexExportJob result = indexExportJob.query(QueryBuilders.matchAllQuery());
+        assertSame(indexExportJob, result);
+    }
+
+    @Test
+    public void test_query_acceptsNull() {
+        final IndexExportJob result = indexExportJob.query(null);
+        assertSame(indexExportJob, result);
+    }
+
+    // --- execute() tests ---
+
+    @Test
+    public void test_execute_success_noDocuments() {
+        setupMockComponents(Collections.emptyList());
+
+        final String result = indexExportJob.execute();
+
+        assertEquals("Exported 0 documents.", result);
+    }
+
+    @Test
+    public void test_execute_success_singleDocument() {
+        final Map<String, Object> doc = new LinkedHashMap<>();
+        doc.put("url", "https://example.com/page.html");
+        doc.put("title", "Test Page");
+        doc.put("content", "Hello World");
+        setupMockComponents(Collections.singletonList(doc));
+
+        final String result = indexExportJob.execute();
+
+        assertEquals("Exported 1 documents.", result);
+        final Path expectedFile = tempDir.resolve("example.com/page.html");
+        assertTrue(Files.exists(expectedFile));
+    }
+
+    @Test
+    public void test_execute_success_multipleDocuments() {
+        final List<Map<String, Object>> docs = new ArrayList<>();
+        for (int i = 0; i < 3; i++) {
+            final Map<String, Object> doc = new LinkedHashMap<>();
+            doc.put("url", "https://example.com/page" + i + ".html");
+            doc.put("title", "Page " + i);
+            doc.put("content", "Content " + i);
+            docs.add(doc);
+        }
+        setupMockComponents(docs);
+
+        final String result = indexExportJob.execute();
+
+        assertEquals("Exported 3 documents.", result);
+        for (int i = 0; i < 3; i++) {
+            assertTrue(Files.exists(tempDir.resolve("example.com/page" + i + ".html")));
+        }
+    }
+
+    @Test
+    public void test_execute_withCustomQuery() {
+        final List<QueryBuilder> capturedQueries = new ArrayList<>();
+        final SearchEngineClient searchEngineClient = new SearchEngineClient() {
+            @Override
+            public long scrollSearch(final String index,
+                    final SearchCondition<org.codelibs.fesen.opensearch.action.search.SearchRequestBuilder> condition,
+                    final BooleanFunction<Map<String, Object>> cursor) {
+                return 0;
+            }
+        };
+        final FessConfig fessConfig = new TestFessConfig(tempDir.toString(), "cache", "100");
+        ComponentUtil.register(searchEngineClient, "searchEngineClient");
+        ComponentUtil.setFessConfig(fessConfig);
+
+        final QueryBuilder customQuery = QueryBuilders.termQuery("host", "example.com");
+        indexExportJob.query(customQuery).execute();
+
+        // Verifies no exception thrown with custom query
+    }
+
+    @Test
+    public void test_execute_withDefaultQuery() {
+        setupMockComponents(Collections.emptyList());
+
+        // No query set, should use matchAllQuery
+        final String result = indexExportJob.execute();
+
+        assertEquals("Exported 0 documents.", result);
+    }
+
+    @Test
+    public void test_execute_withException() {
+        final SearchEngineClient searchEngineClient = new SearchEngineClient() {
+            @Override
+            public long scrollSearch(final String index,
+                    final SearchCondition<org.codelibs.fesen.opensearch.action.search.SearchRequestBuilder> condition,
+                    final BooleanFunction<Map<String, Object>> cursor) {
+                throw new RuntimeException("Search engine error");
+            }
+        };
+        final FessConfig fessConfig = new TestFessConfig(tempDir.toString(), "cache", "100");
+        ComponentUtil.register(searchEngineClient, "searchEngineClient");
+        ComponentUtil.setFessConfig(fessConfig);
+
+        final String result = indexExportJob.execute();
+
+        assertTrue(result.contains("Search engine error"));
+        assertTrue(result.endsWith("\n"));
+    }
+
+    @Test
+    public void test_execute_skipsDocumentsWithoutUrl() {
+        final Map<String, Object> doc = new LinkedHashMap<>();
+        doc.put("title", "No URL Doc");
+        doc.put("content", "Content without URL");
+        setupMockComponents(Collections.singletonList(doc));
+
+        final String result = indexExportJob.execute();
+
+        assertEquals("Exported 1 documents.", result);
+        // No file should be created
+        assertFalse(Files.exists(tempDir.resolve("_invalid")));
+    }
+
+    @Test
+    public void test_execute_excludeFieldsFromConfig() {
+        final Map<String, Object> doc = new LinkedHashMap<>();
+        doc.put("url", "https://example.com/page.html");
+        doc.put("title", "Test");
+        doc.put("content", "Body");
+        doc.put("cache", "cached content");
+        doc.put("host", "example.com");
+
+        final FessConfig fessConfig = new TestFessConfig(tempDir.toString(), "cache,internal_field", "100");
+        final SearchEngineClient searchEngineClient = new SearchEngineClient() {
+            @Override
+            public long scrollSearch(final String index,
+                    final SearchCondition<org.codelibs.fesen.opensearch.action.search.SearchRequestBuilder> condition,
+                    final BooleanFunction<Map<String, Object>> cursor) {
+                cursor.apply(doc);
+                return 1;
+            }
+        };
+        ComponentUtil.register(searchEngineClient, "searchEngineClient");
+        ComponentUtil.setFessConfig(fessConfig);
+
+        indexExportJob.execute();
+
+        final Path file = tempDir.resolve("example.com/page.html");
+        assertTrue(Files.exists(file));
+        try {
+            final String html = Files.readString(file, StandardCharsets.UTF_8);
+            assertFalse(html.contains("fess:cache"));
+            assertTrue(html.contains("fess:host"));
+        } catch (final IOException e) {
+            fail("Failed to read exported file: " + e.getMessage());
+        }
+    }
+
+    @Test
+    public void test_execute_usesCorrectIndex() {
+        final List<String> capturedIndices = new ArrayList<>();
+        final SearchEngineClient searchEngineClient = new SearchEngineClient() {
+            @Override
+            public long scrollSearch(final String index,
+                    final SearchCondition<org.codelibs.fesen.opensearch.action.search.SearchRequestBuilder> condition,
+                    final BooleanFunction<Map<String, Object>> cursor) {
+                capturedIndices.add(index);
+                return 0;
+            }
+        };
+        final FessConfig fessConfig = new TestFessConfig(tempDir.toString(), "cache", "50");
+        ComponentUtil.register(searchEngineClient, "searchEngineClient");
+        ComponentUtil.setFessConfig(fessConfig);
+
+        indexExportJob.execute();
+
+        assertEquals(1, capturedIndices.size());
+        assertEquals("fess.search", capturedIndices.get(0));
+    }
+
+    // --- buildFilePath() tests ---
+
+    @Test
+    public void test_buildFilePath_simpleUrl() {
+        final Path result = indexExportJob.buildFilePath("/export", "https://example.com/docs/guide.html", new HtmlIndexExportFormatter());
+        assertEquals(Path.of("/export/example.com/docs/guide.html"), result);
+    }
+
+    @Test
+    public void test_buildFilePath_rootUrl() {
+        final Path result = indexExportJob.buildFilePath("/export", "https://example.com/", new HtmlIndexExportFormatter());
+        assertEquals(Path.of("/export/example.com/index.html"), result);
+    }
+
+    @Test
+    public void test_buildFilePath_noPath() {
+        final Path result = indexExportJob.buildFilePath("/export", "https://example.com", new HtmlIndexExportFormatter());
+        assertEquals(Path.of("/export/example.com/index.html"), result);
+    }
+
+    @Test
+    public void test_buildFilePath_noExtension() {
+        final Path result = indexExportJob.buildFilePath("/export", "https://example.com/docs/guide", new HtmlIndexExportFormatter());
+        assertEquals(Path.of("/export/example.com/docs/guide.html"), result);
+    }
+
+    @Test
+    public void test_buildFilePath_trailingSlash() {
+        final Path result = indexExportJob.buildFilePath("/export", "https://example.com/docs/", new HtmlIndexExportFormatter());
+        assertEquals(Path.of("/export/example.com/docs/index.html"), result);
+    }
+
+    @Test
+    public void test_buildFilePath_deepPath() {
+        final Path result =
+                indexExportJob.buildFilePath("/export", "https://example.com/a/b/c/d/page.html", new HtmlIndexExportFormatter());
+        assertEquals(Path.of("/export/example.com/a/b/c/d/page.html"), result);
+    }
+
+    @Test
+    public void test_buildFilePath_httpScheme() {
+        final Path result = indexExportJob.buildFilePath("/export", "http://example.com/page.html", new HtmlIndexExportFormatter());
+        assertEquals(Path.of("/export/example.com/page.html"), result);
+    }
+
+    @Test
+    public void test_buildFilePath_fileScheme() {
+        final Path result = indexExportJob.buildFilePath("/export", "file:///home/user/doc.html", new HtmlIndexExportFormatter());
+        assertEquals(Path.of("/export/_local/home/user/doc.html"), result);
+    }
+
+    @Test
+    public void test_buildFilePath_specialCharacters() {
+        // < in URL makes it an invalid URI, so it falls back to hash-based path
+        final Path result =
+                indexExportJob.buildFilePath("/export", "https://example.com/path/file<name>.html", new HtmlIndexExportFormatter());
+        assertTrue(result.toString().startsWith("/export/_invalid/"));
+        assertTrue(result.toString().endsWith(".html"));
+    }
+
+    @Test
+    public void test_buildFilePath_colonInFilename() {
+        // Colon is valid in URI path but should be sanitized in filesystem path
+        final Path result =
+                indexExportJob.buildFilePath("/export", "https://example.com/path/file%3Aname.html", new HtmlIndexExportFormatter());
+        assertEquals(Path.of("/export/example.com/path/file_name.html"), result);
+    }
+
+    @Test
+    public void test_buildFilePath_questionMarkInPath() {
+        final Path result = indexExportJob.buildFilePath("/export", "https://example.com/page?query=1", new HtmlIndexExportFormatter());
+        // URI.getPath() returns /page for this URL (query is separate)
+        assertEquals(Path.of("/export/example.com/page.html"), result);
+    }
+
+    @Test
+    public void test_buildFilePath_longPathComponent() {
+        final StringBuilder longName = new StringBuilder();
+        for (int i = 0; i < 250; i++) {
+            longName.append("a");
+        }
+        final Path result =
+                indexExportJob.buildFilePath("/export", "https://example.com/" + longName + ".html", new HtmlIndexExportFormatter());
+        final String fileName = result.getFileName().toString();
+        assertTrue(fileName.length() <= 200);
+    }
+
+    @Test
+    public void test_buildFilePath_invalidUrl() {
+        final Path result = indexExportJob.buildFilePath("/export", "not a valid url %%%", new HtmlIndexExportFormatter());
+        assertTrue(result.toString().startsWith("/export/_invalid/"));
+        assertTrue(result.toString().endsWith(".html"));
+    }
+
+    @Test
+    public void test_buildFilePath_dotInDirectoryName() {
+        final Path result = indexExportJob.buildFilePath("/export", "https://example.com/v1.0/page", new HtmlIndexExportFormatter());
+        // v1.0 is a directory, page has no extension
+        assertEquals(Path.of("/export/example.com/v1.0/page.html"), result);
+    }
+
+    @Test
+    public void test_buildFilePath_multipleDotsInFilename() {
+        final Path result = indexExportJob.buildFilePath("/export", "https://example.com/file.name.html", new HtmlIndexExportFormatter());
+        assertEquals(Path.of("/export/example.com/file.name.html"), result);
+    }
+
+    @Test
+    public void test_buildFilePath_pdfExtension() {
+        final Path result = indexExportJob.buildFilePath("/export", "https://example.com/doc.pdf", new HtmlIndexExportFormatter());
+        assertEquals(Path.of("/export/example.com/doc.pdf"), result);
+    }
+
+    @Test
+    public void test_buildFilePath_portInUrl() {
+        final Path result = indexExportJob.buildFilePath("/export", "https://example.com:8080/page.html", new HtmlIndexExportFormatter());
+        assertEquals(Path.of("/export/example.com/page.html"), result);
+    }
+
+    @Test
+    public void test_buildFilePath_encodedCharacters() {
+        final Path result = indexExportJob.buildFilePath("/export", "https://example.com/path%20with%20spaces/file.html",
+                new HtmlIndexExportFormatter());
+        assertEquals(Path.of("/export/example.com/path with spaces/file.html"), result);
+    }
+
+    // --- buildHtml() tests ---
+
+    @Test
+    public void test_buildHtml_basicDocument() {
+        final Map<String, Object> source = new LinkedHashMap<>();
+        source.put("title", "Test Title");
+        source.put("content", "Test Content");
+        source.put("lang", "en");
+        source.put("url", "https://example.com/page.html");
+
+        final String html = new HtmlIndexExportFormatter().format(source, Collections.emptySet());
+
+        assertTrue(html.contains("<!DOCTYPE html>"));
+        assertTrue(html.contains("<html lang=\"en\">"));
+        assertTrue(html.contains("<title>Test Title</title>"));
+        assertTrue(html.contains("<meta charset=\"UTF-8\">"));
+        assertTrue(html.contains("Test Content"));
+        assertTrue(html.contains("<meta name=\"fess:url\" content=\"https://example.com/page.html\">"));
+    }
+
+    @Test
+    public void test_buildHtml_htmlEscaping() {
+        final Map<String, Object> source = new LinkedHashMap<>();
+        source.put("title", "Title with <script>alert('xss')</script>");
+        source.put("content", "Content with & < > \" '");
+        source.put("lang", "en");
+
+        final String html = new HtmlIndexExportFormatter().format(source, Collections.emptySet());
+
+        assertTrue(html.contains("<title>Title with &lt;script&gt;alert(&#39;xss&#39;)&lt;/script&gt;</title>"));
+        assertTrue(html.contains("Content with &amp; &lt; &gt; &quot; &#39;"));
+        assertFalse(html.contains("<script>"));
+    }
+
+    @Test
+    public void test_buildHtml_excludeFields() {
+        final Map<String, Object> source = new LinkedHashMap<>();
+        source.put("title", "Test");
+        source.put("content", "Body");
+        source.put("cache", "cached data");
+        source.put("host", "example.com");
+
+        final Set<String> excludeFields = Set.of("cache");
+        final String html = new HtmlIndexExportFormatter().format(source, excludeFields);
+
+        assertFalse(html.contains("fess:cache"));
+        assertTrue(html.contains("fess:host"));
+    }
+
+    @Test
+    public void test_buildHtml_collectionField() {
+        final Map<String, Object> source = new LinkedHashMap<>();
+        source.put("title", "Test");
+        source.put("content", "Body");
+        source.put("anchor", Arrays.asList("http://a.com", "http://b.com", "http://c.com"));
+
+        final String html = new HtmlIndexExportFormatter().format(source, Collections.emptySet());
+
+        int count = 0;
+        int idx = 0;
+        while ((idx = html.indexOf("fess:anchor", idx)) != -1) {
+            count++;
+            idx++;
+        }
+        assertEquals(3, count);
+        assertTrue(html.contains("content=\"http://a.com\""));
+        assertTrue(html.contains("content=\"http://b.com\""));
+        assertTrue(html.contains("content=\"http://c.com\""));
+    }
+
+    @Test
+    public void test_buildHtml_emptyCollection() {
+        final Map<String, Object> source = new LinkedHashMap<>();
+        source.put("title", "Test");
+        source.put("content", "Body");
+        source.put("anchor", Collections.emptyList());
+
+        final String html = new HtmlIndexExportFormatter().format(source, Collections.emptySet());
+
+        assertFalse(html.contains("fess:anchor"));
+    }
+
+    @Test
+    public void test_buildHtml_nullValue() {
+        final Map<String, Object> source = new LinkedHashMap<>();
+        source.put("title", "Test");
+        source.put("content", "Body");
+        source.put("field_with_null", null);
+
+        final String html = new HtmlIndexExportFormatter().format(source, Collections.emptySet());
+
+        assertFalse(html.contains("fess:field_with_null"));
+    }
+
+    @Test
+    public void test_buildHtml_missingTitle() {
+        final Map<String, Object> source = new LinkedHashMap<>();
+        source.put("content", "Body");
+        source.put("url", "https://example.com/");
+
+        final String html = new HtmlIndexExportFormatter().format(source, Collections.emptySet());
+
+        assertTrue(html.contains("<title></title>"));
+    }
+
+    @Test
+    public void test_buildHtml_missingContent() {
+        final Map<String, Object> source = new LinkedHashMap<>();
+        source.put("title", "Test");
+        source.put("url", "https://example.com/");
+
+        final String html = new HtmlIndexExportFormatter().format(source, Collections.emptySet());
+
+        assertTrue(html.contains("<body>"));
+        assertTrue(html.contains("</body>"));
+    }
+
+    @Test
+    public void test_buildHtml_missingLang() {
+        final Map<String, Object> source = new LinkedHashMap<>();
+        source.put("title", "Test");
+        source.put("content", "Body");
+
+        final String html = new HtmlIndexExportFormatter().format(source, Collections.emptySet());
+
+        assertTrue(html.contains("<html lang=\"\">"));
+    }
+
+    @Test
+    public void test_buildHtml_numericFieldValue() {
+        final Map<String, Object> source = new LinkedHashMap<>();
+        source.put("title", "Test");
+        source.put("content", "Body");
+        source.put("boost", 1.5);
+        source.put("content_length", 12345);
+
+        final String html = new HtmlIndexExportFormatter().format(source, Collections.emptySet());
+
+        assertTrue(html.contains("<meta name=\"fess:boost\" content=\"1.5\">"));
+        assertTrue(html.contains("<meta name=\"fess:content_length\" content=\"12345\">"));
+    }
+
+    @Test
+    public void test_buildHtml_titleContentLangNotInMeta() {
+        final Map<String, Object> source = new LinkedHashMap<>();
+        source.put("title", "My Title");
+        source.put("content", "My Content");
+        source.put("lang", "ja");
+        source.put("url", "https://example.com/");
+
+        final String html = new HtmlIndexExportFormatter().format(source, Collections.emptySet());
+
+        assertFalse(html.contains("fess:title"));
+        assertFalse(html.contains("fess:content"));
+        assertFalse(html.contains("fess:lang"));
+        assertTrue(html.contains("fess:url"));
+    }
+
+    @Test
+    public void test_buildHtml_multipleExcludeFields() {
+        final Map<String, Object> source = new LinkedHashMap<>();
+        source.put("title", "Test");
+        source.put("content", "Body");
+        source.put("cache", "cached");
+        source.put("segment", "seg1");
+        source.put("host", "example.com");
+
+        final Set<String> excludeFields = Set.of("cache", "segment");
+        final String html = new HtmlIndexExportFormatter().format(source, excludeFields);
+
+        assertFalse(html.contains("fess:cache"));
+        assertFalse(html.contains("fess:segment"));
+        assertTrue(html.contains("fess:host"));
+    }
+
+    // --- exportDocument() tests ---
+
+    @Test
+    public void test_exportDocument_createsFile() {
+        final Map<String, Object> source = new LinkedHashMap<>();
+        source.put("url", "https://example.com/test.html");
+        source.put("title", "Test");
+        source.put("content", "Hello");
+
+        indexExportJob.exportDocument(source, tempDir.toString(), Collections.emptySet(), new HtmlIndexExportFormatter());
+
+        final Path expectedFile = tempDir.resolve("example.com/test.html");
+        assertTrue(Files.exists(expectedFile));
+    }
+
+    @Test
+    public void test_exportDocument_fileContent() throws IOException {
+        final Map<String, Object> source = new LinkedHashMap<>();
+        source.put("url", "https://example.com/test.html");
+        source.put("title", "My Title");
+        source.put("content", "My Content");
+        source.put("lang", "ja");
+
+        indexExportJob.exportDocument(source, tempDir.toString(), Collections.emptySet(), new HtmlIndexExportFormatter());
+
+        final Path file = tempDir.resolve("example.com/test.html");
+        final String content = Files.readString(file, StandardCharsets.UTF_8);
+        assertTrue(content.contains("<title>My Title</title>"));
+        assertTrue(content.contains("My Content"));
+        assertTrue(content.contains("<html lang=\"ja\">"));
+    }
+
+    @Test
+    public void test_exportDocument_createsDirectories() {
+        final Map<String, Object> source = new LinkedHashMap<>();
+        source.put("url", "https://example.com/a/b/c/deep.html");
+        source.put("title", "Deep");
+        source.put("content", "Content");
+
+        indexExportJob.exportDocument(source, tempDir.toString(), Collections.emptySet(), new HtmlIndexExportFormatter());
+
+        assertTrue(Files.exists(tempDir.resolve("example.com/a/b/c/deep.html")));
+    }
+
+    @Test
+    public void test_exportDocument_skipWithoutUrl() {
+        final Map<String, Object> source = new LinkedHashMap<>();
+        source.put("title", "No URL");
+        source.put("content", "Content");
+
+        indexExportJob.exportDocument(source, tempDir.toString(), Collections.emptySet(), new HtmlIndexExportFormatter());
+
+        // No files created
+        try {
+            assertEquals(0, Files.list(tempDir).count());
+        } catch (final IOException e) {
+            fail("Failed to list temp directory: " + e.getMessage());
+        }
+    }
+
+    @Test
+    public void test_exportDocument_skipWithNullUrl() {
+        final Map<String, Object> source = new LinkedHashMap<>();
+        source.put("url", null);
+        source.put("title", "Null URL");
+
+        indexExportJob.exportDocument(source, tempDir.toString(), Collections.emptySet(), new HtmlIndexExportFormatter());
+
+        try {
+            assertEquals(0, Files.list(tempDir).count());
+        } catch (final IOException e) {
+            fail("Failed to list temp directory: " + e.getMessage());
+        }
+    }
+
+    @Test
+    public void test_exportDocument_overwritesExistingFile() throws IOException {
+        final Map<String, Object> source1 = new LinkedHashMap<>();
+        source1.put("url", "https://example.com/page.html");
+        source1.put("title", "First");
+        source1.put("content", "First content");
+
+        final Map<String, Object> source2 = new LinkedHashMap<>();
+        source2.put("url", "https://example.com/page.html");
+        source2.put("title", "Second");
+        source2.put("content", "Second content");
+
+        indexExportJob.exportDocument(source1, tempDir.toString(), Collections.emptySet(), new HtmlIndexExportFormatter());
+        indexExportJob.exportDocument(source2, tempDir.toString(), Collections.emptySet(), new HtmlIndexExportFormatter());
+
+        final Path file = tempDir.resolve("example.com/page.html");
+        final String content = Files.readString(file, StandardCharsets.UTF_8);
+        assertTrue(content.contains("Second"));
+        assertFalse(content.contains("First"));
+    }
+
+    @Test
+    public void test_exportDocument_excludeFields() throws IOException {
+        final Map<String, Object> source = new LinkedHashMap<>();
+        source.put("url", "https://example.com/page.html");
+        source.put("title", "Test");
+        source.put("content", "Body");
+        source.put("cache", "should be excluded");
+        source.put("host", "example.com");
+
+        indexExportJob.exportDocument(source, tempDir.toString(), Set.of("cache"), new HtmlIndexExportFormatter());
+
+        final Path file = tempDir.resolve("example.com/page.html");
+        final String content = Files.readString(file, StandardCharsets.UTF_8);
+        assertFalse(content.contains("should be excluded"));
+        assertTrue(content.contains("fess:host"));
+    }
+
+    @Test
+    public void test_exportDocument_withCollectionField() throws IOException {
+        final Map<String, Object> source = new LinkedHashMap<>();
+        source.put("url", "https://example.com/page.html");
+        source.put("title", "Test");
+        source.put("content", "Body");
+        source.put("role", Arrays.asList("admin", "user"));
+
+        indexExportJob.exportDocument(source, tempDir.toString(), Collections.emptySet(), new HtmlIndexExportFormatter());
+
+        final Path file = tempDir.resolve("example.com/page.html");
+        final String content = Files.readString(file, StandardCharsets.UTF_8);
+        assertTrue(content.contains("<meta name=\"fess:role\" content=\"admin\">"));
+        assertTrue(content.contains("<meta name=\"fess:role\" content=\"user\">"));
+    }
+
+    // --- Integration-style tests ---
+
+    @Test
+    public void test_execute_fullFlow() throws IOException {
+        final List<Map<String, Object>> docs = new ArrayList<>();
+        final Map<String, Object> doc1 = new LinkedHashMap<>();
+        doc1.put("url", "https://example.com/page1.html");
+        doc1.put("title", "Page 1");
+        doc1.put("content", "Content 1");
+        doc1.put("lang", "en");
+        doc1.put("host", "example.com");
+        doc1.put("cache", "cached1");
+        docs.add(doc1);
+
+        final Map<String, Object> doc2 = new LinkedHashMap<>();
+        doc2.put("url", "https://other.com/docs/guide");
+        doc2.put("title", "Guide");
+        doc2.put("content", "Guide content");
+        doc2.put("lang", "ja");
+        doc2.put("anchor", Arrays.asList("https://a.com", "https://b.com"));
+        docs.add(doc2);
+
+        setupMockComponents(docs);
+
+        final String result = indexExportJob.execute();
+
+        assertEquals("Exported 2 documents.", result);
+
+        // Verify first document
+        final Path file1 = tempDir.resolve("example.com/page1.html");
+        assertTrue(Files.exists(file1));
+        final String html1 = Files.readString(file1, StandardCharsets.UTF_8);
+        assertTrue(html1.contains("<title>Page 1</title>"));
+        assertTrue(html1.contains("<html lang=\"en\">"));
+        assertFalse(html1.contains("fess:cache"));
+        assertTrue(html1.contains("fess:host"));
+
+        // Verify second document (no extension in URL -> .html appended)
+        final Path file2 = tempDir.resolve("other.com/docs/guide.html");
+        assertTrue(Files.exists(file2));
+        final String html2 = Files.readString(file2, StandardCharsets.UTF_8);
+        assertTrue(html2.contains("<title>Guide</title>"));
+        assertTrue(html2.contains("<html lang=\"ja\">"));
+        assertTrue(html2.contains("fess:anchor"));
+    }
+
+    @Test
+    public void test_execute_withFluentApi() {
+        setupMockComponents(Collections.emptyList());
+
+        final String result = indexExportJob.query(QueryBuilders.termQuery("host", "example.com")).execute();
+
+        assertEquals("Exported 0 documents.", result);
+    }
+
+    // --- Edge cases ---
+
+    @Test
+    public void test_buildFilePath_emptyString() {
+        // Empty string is a valid relative URI with null host and empty path
+        final Path result = indexExportJob.buildFilePath("/export", "", new HtmlIndexExportFormatter());
+        assertEquals(Path.of("/export/_local/index.html"), result);
+    }
+
+    @Test
+    public void test_buildFilePath_fragmentUrl() {
+        final Path result =
+                indexExportJob.buildFilePath("/export", "https://example.com/page.html#section1", new HtmlIndexExportFormatter());
+        assertEquals(Path.of("/export/example.com/page.html"), result);
+    }
+
+    @Test
+    public void test_buildFilePath_consistentHashForSameUrl() {
+        final Path result1 = indexExportJob.buildFilePath("/export", "not valid %%%", new HtmlIndexExportFormatter());
+        final Path result2 = indexExportJob.buildFilePath("/export", "not valid %%%", new HtmlIndexExportFormatter());
+        assertEquals(result1, result2);
+    }
+
+    @Test
+    public void test_buildFilePath_differentHashForDifferentUrls() {
+        final Path result1 = indexExportJob.buildFilePath("/export", "invalid url 1 %%%", new HtmlIndexExportFormatter());
+        final Path result2 = indexExportJob.buildFilePath("/export", "invalid url 2 %%%", new HtmlIndexExportFormatter());
+        assertFalse(result1.equals(result2));
+    }
+
+    @Test
+    public void test_buildHtml_emptyMap() {
+        final String html = new HtmlIndexExportFormatter().format(Collections.emptyMap(), Collections.emptySet());
+
+        assertTrue(html.contains("<!DOCTYPE html>"));
+        assertTrue(html.contains("<title></title>"));
+        assertTrue(html.contains("<html lang=\"\">"));
+    }
+
+    @Test
+    public void test_buildHtml_specialCharactersInFieldName() {
+        final Map<String, Object> source = new LinkedHashMap<>();
+        source.put("title", "Test");
+        source.put("content", "Body");
+        source.put("field<with>special", "value");
+
+        final String html = new HtmlIndexExportFormatter().format(source, Collections.emptySet());
+
+        assertTrue(html.contains("fess:field&lt;with&gt;special"));
+    }
+
+    @Test
+    public void test_execute_emptyExcludeFields() {
+        final Map<String, Object> doc = new LinkedHashMap<>();
+        doc.put("url", "https://example.com/page.html");
+        doc.put("title", "Test");
+        doc.put("content", "Body");
+        doc.put("cache", "should appear");
+
+        final SearchEngineClient searchEngineClient = new SearchEngineClient() {
+            @Override
+            public long scrollSearch(final String index,
+                    final SearchCondition<org.codelibs.fesen.opensearch.action.search.SearchRequestBuilder> condition,
+                    final BooleanFunction<Map<String, Object>> cursor) {
+                cursor.apply(doc);
+                return 1;
+            }
+        };
+        // Empty exclude fields
+        final FessConfig fessConfig = new TestFessConfig(tempDir.toString(), "", "100");
+        ComponentUtil.register(searchEngineClient, "searchEngineClient");
+        ComponentUtil.setFessConfig(fessConfig);
+
+        indexExportJob.execute();
+
+        final Path file = tempDir.resolve("example.com/page.html");
+        assertTrue(Files.exists(file));
+        try {
+            final String html = Files.readString(file, StandardCharsets.UTF_8);
+            assertTrue(html.contains("fess:cache"));
+        } catch (final IOException e) {
+            fail("Failed to read file: " + e.getMessage());
+        }
+    }
+
+    // --- format() fluent API tests ---
+
+    @Test
+    public void test_format_returnsThis() {
+        final IndexExportJob result = indexExportJob.format("html");
+        assertSame(indexExportJob, result);
+    }
+
+    @Test
+    public void test_format_unsupportedFormat() {
+        try {
+            indexExportJob.format("xml");
+            fail("Expected IllegalArgumentException");
+        } catch (final IllegalArgumentException e) {
+            assertTrue(e.getMessage().contains("xml"));
+        }
+    }
+
+    @Test
+    public void test_format_caseInsensitive() {
+        final IndexExportJob result = indexExportJob.format("JSON");
+        assertSame(indexExportJob, result);
+    }
+
+    // --- JsonIndexExportFormatter tests ---
+
+    @Test
+    public void test_jsonFormatter_basicDocument() {
+        final Map<String, Object> source = new LinkedHashMap<>();
+        source.put("title", "Test Title");
+        source.put("content", "Test Content");
+        source.put("url", "https://example.com/page.html");
+
+        final String json = new JsonIndexExportFormatter().format(source, Collections.emptySet());
+
+        assertTrue(json.contains("\"title\": \"Test Title\""));
+        assertTrue(json.contains("\"content\": \"Test Content\""));
+        assertTrue(json.contains("\"url\": \"https://example.com/page.html\""));
+        assertTrue(json.startsWith("{"));
+        assertTrue(json.trim().endsWith("}"));
+    }
+
+    @Test
+    public void test_jsonFormatter_excludeFields() {
+        final Map<String, Object> source = new LinkedHashMap<>();
+        source.put("title", "Test");
+        source.put("content", "Body");
+        source.put("cache", "cached data");
+        source.put("host", "example.com");
+
+        final Set<String> excludeFields = Set.of("cache");
+        final String json = new JsonIndexExportFormatter().format(source, excludeFields);
+
+        assertFalse(json.contains("\"cache\""));
+        assertTrue(json.contains("\"host\": \"example.com\""));
+    }
+
+    @Test
+    public void test_jsonFormatter_collectionField() {
+        final Map<String, Object> source = new LinkedHashMap<>();
+        source.put("title", "Test");
+        source.put("anchor", Arrays.asList("http://a.com", "http://b.com"));
+
+        final String json = new JsonIndexExportFormatter().format(source, Collections.emptySet());
+
+        assertTrue(json.contains("\"anchor\": [\"http://a.com\", \"http://b.com\"]"));
+    }
+
+    @Test
+    public void test_jsonFormatter_specialCharacterEscaping() {
+        final Map<String, Object> source = new LinkedHashMap<>();
+        source.put("title", "Title with \"quotes\" and \\backslash");
+        source.put("content", "Line1\nLine2\tTabbed");
+
+        final String json = new JsonIndexExportFormatter().format(source, Collections.emptySet());
+
+        assertTrue(json.contains("\\\"quotes\\\""));
+        assertTrue(json.contains("\\\\backslash"));
+        assertTrue(json.contains("\\n"));
+        assertTrue(json.contains("\\t"));
+    }
+
+    @Test
+    public void test_jsonFormatter_numericAndBooleanValues() {
+        final Map<String, Object> source = new LinkedHashMap<>();
+        source.put("boost", 1.5);
+        source.put("content_length", 12345);
+        source.put("active", true);
+
+        final String json = new JsonIndexExportFormatter().format(source, Collections.emptySet());
+
+        assertTrue(json.contains("\"boost\": 1.5"));
+        assertTrue(json.contains("\"content_length\": 12345"));
+        assertTrue(json.contains("\"active\": true"));
+    }
+
+    @Test
+    public void test_jsonFormatter_nullValue() {
+        final Map<String, Object> source = new LinkedHashMap<>();
+        source.put("title", "Test");
+        source.put("field_with_null", null);
+
+        final String json = new JsonIndexExportFormatter().format(source, Collections.emptySet());
+
+        assertFalse(json.contains("field_with_null"));
+    }
+
+    @Test
+    public void test_jsonFormatter_emptyMap() {
+        final String json = new JsonIndexExportFormatter().format(Collections.emptyMap(), Collections.emptySet());
+
+        assertTrue(json.contains("{"));
+        assertTrue(json.trim().endsWith("}"));
+    }
+
+    @Test
+    public void test_jsonFormatter_fileExtension() {
+        final JsonIndexExportFormatter formatter = new JsonIndexExportFormatter();
+        assertEquals(".json", formatter.getFileExtension());
+        assertEquals("index.json", formatter.getIndexFileName());
+    }
+
+    @Test
+    public void test_jsonFormatter_emptyCollection() {
+        final Map<String, Object> source = new LinkedHashMap<>();
+        source.put("title", "Test");
+        source.put("anchor", Collections.emptyList());
+
+        final String json = new JsonIndexExportFormatter().format(source, Collections.emptySet());
+
+        assertTrue(json.contains("\"anchor\": []"));
+    }
+
+    @Test
+    public void test_jsonFormatter_emptyStringValue() {
+        final Map<String, Object> source = new LinkedHashMap<>();
+        source.put("title", "");
+
+        final String json = new JsonIndexExportFormatter().format(source, Collections.emptySet());
+
+        assertTrue(json.contains("\"title\": \"\""));
+    }
+
+    @Test
+    public void test_jsonFormatter_controlCharacters() {
+        final Map<String, Object> source = new LinkedHashMap<>();
+        source.put("text", "back\bfeed\freturn\r");
+
+        final String json = new JsonIndexExportFormatter().format(source, Collections.emptySet());
+
+        assertTrue(json.contains("\\b"));
+        assertTrue(json.contains("\\f"));
+        assertTrue(json.contains("\\r"));
+    }
+
+    @Test
+    public void test_jsonFormatter_unicodeControlCharacter() {
+        final Map<String, Object> source = new LinkedHashMap<>();
+        source.put("text", "ctrl\u0001char");
+
+        final String json = new JsonIndexExportFormatter().format(source, Collections.emptySet());
+
+        assertTrue(json.contains("\\u0001"));
+    }
+
+    @Test
+    public void test_jsonFormatter_multipleExcludeFields() {
+        final Map<String, Object> source = new LinkedHashMap<>();
+        source.put("title", "Test");
+        source.put("cache", "cached");
+        source.put("segment", "seg1");
+        source.put("host", "example.com");
+
+        final Set<String> excludeFields = Set.of("cache", "segment");
+        final String json = new JsonIndexExportFormatter().format(source, excludeFields);
+
+        assertFalse(json.contains("\"cache\""));
+        assertFalse(json.contains("\"segment\""));
+        assertTrue(json.contains("\"title\": \"Test\""));
+        assertTrue(json.contains("\"host\": \"example.com\""));
+    }
+
+    @Test
+    public void test_jsonFormatter_allFieldsExcluded() {
+        final Map<String, Object> source = new LinkedHashMap<>();
+        source.put("title", "Test");
+        source.put("content", "Body");
+
+        final Set<String> excludeFields = Set.of("title", "content");
+        final String json = new JsonIndexExportFormatter().format(source, excludeFields);
+
+        assertFalse(json.contains("\"title\""));
+        assertFalse(json.contains("\"content\""));
+        assertTrue(json.startsWith("{"));
+        assertTrue(json.trim().endsWith("}"));
+    }
+
+    @Test
+    public void test_jsonFormatter_fieldNameWithSpecialCharacters() {
+        final Map<String, Object> source = new LinkedHashMap<>();
+        source.put("field\"name", "value");
+
+        final String json = new JsonIndexExportFormatter().format(source, Collections.emptySet());
+
+        assertTrue(json.contains("\"field\\\"name\": \"value\""));
+    }
+
+    @Test
+    public void test_jsonFormatter_singleField() {
+        final Map<String, Object> source = new LinkedHashMap<>();
+        source.put("title", "Only");
+
+        final String json = new JsonIndexExportFormatter().format(source, Collections.emptySet());
+
+        assertTrue(json.contains("\"title\": \"Only\""));
+        // No comma should appear with single field
+        assertFalse(json.contains(","));
+    }
+
+    @Test
+    public void test_jsonFormatter_booleanFalse() {
+        final Map<String, Object> source = new LinkedHashMap<>();
+        source.put("active", false);
+
+        final String json = new JsonIndexExportFormatter().format(source, Collections.emptySet());
+
+        assertTrue(json.contains("\"active\": false"));
+    }
+
+    @Test
+    public void test_jsonFormatter_negativeAndZeroNumbers() {
+        final Map<String, Object> source = new LinkedHashMap<>();
+        source.put("negative", -42);
+        source.put("zero", 0);
+        source.put("negativeDouble", -1.5);
+
+        final String json = new JsonIndexExportFormatter().format(source, Collections.emptySet());
+
+        assertTrue(json.contains("\"negative\": -42"));
+        assertTrue(json.contains("\"zero\": 0"));
+        assertTrue(json.contains("\"negativeDouble\": -1.5"));
+    }
+
+    @Test
+    public void test_jsonFormatter_mixedTypesInCollection() {
+        final Map<String, Object> source = new LinkedHashMap<>();
+        source.put("mixed", Arrays.asList("text", 42, true));
+
+        final String json = new JsonIndexExportFormatter().format(source, Collections.emptySet());
+
+        assertTrue(json.contains("\"mixed\": [\"text\", 42, true]"));
+    }
+
+    @Test
+    public void test_jsonFormatter_nestedMap() {
+        final Map<String, Object> source = new LinkedHashMap<>();
+        final Map<String, Object> nested = new LinkedHashMap<>();
+        nested.put("a", 1);
+        nested.put("b", "text");
+        source.put("meta", nested);
+
+        final String json = new JsonIndexExportFormatter().format(source, Collections.emptySet());
+
+        assertTrue(json.contains("\"meta\": {\"a\": 1, \"b\": \"text\"}"));
+    }
+
+    @Test
+    public void test_jsonFormatter_deeplyNestedMap() {
+        final Map<String, Object> source = new LinkedHashMap<>();
+        final Map<String, Object> inner = new LinkedHashMap<>();
+        inner.put("key", "value");
+        final Map<String, Object> outer = new LinkedHashMap<>();
+        outer.put("inner", inner);
+        source.put("nested", outer);
+
+        final String json = new JsonIndexExportFormatter().format(source, Collections.emptySet());
+
+        assertTrue(json.contains("\"nested\": {\"inner\": {\"key\": \"value\"}}"));
+    }
+
+    @Test
+    public void test_jsonFormatter_mapWithCollection() {
+        final Map<String, Object> source = new LinkedHashMap<>();
+        final Map<String, Object> nested = new LinkedHashMap<>();
+        nested.put("tags", Arrays.asList("a", "b"));
+        source.put("meta", nested);
+
+        final String json = new JsonIndexExportFormatter().format(source, Collections.emptySet());
+
+        assertTrue(json.contains("\"meta\": {\"tags\": [\"a\", \"b\"]}"));
+    }
+
+    @Test
+    public void test_jsonFormatter_emptyNestedMap() {
+        final Map<String, Object> source = new LinkedHashMap<>();
+        source.put("meta", new LinkedHashMap<>());
+
+        final String json = new JsonIndexExportFormatter().format(source, Collections.emptySet());
+
+        assertTrue(json.contains("\"meta\": {}"));
+    }
+
+    @Test
+    public void test_jsonFormatter_mapKeyWithSpecialCharacters() {
+        final Map<String, Object> source = new LinkedHashMap<>();
+        final Map<String, Object> nested = new LinkedHashMap<>();
+        nested.put("key\"name", "value");
+        source.put("meta", nested);
+
+        final String json = new JsonIndexExportFormatter().format(source, Collections.emptySet());
+
+        assertTrue(json.contains("\"key\\\"name\": \"value\""));
+    }
+
+    @Test
+    public void test_htmlFormatter_fileExtension() {
+        final HtmlIndexExportFormatter formatter = new HtmlIndexExportFormatter();
+        assertEquals(".html", formatter.getFileExtension());
+        assertEquals("index.html", formatter.getIndexFileName());
+    }
+
+    @Test
+    public void test_htmlFormatter_booleanValue() {
+        final Map<String, Object> source = new LinkedHashMap<>();
+        source.put("title", "Test");
+        source.put("content", "Body");
+        source.put("active", true);
+
+        final String html = new HtmlIndexExportFormatter().format(source, Collections.emptySet());
+
+        assertTrue(html.contains("<meta name=\"fess:active\" content=\"true\">"));
+    }
+
+    @Test
+    public void test_htmlFormatter_allFieldsExcluded() {
+        final Map<String, Object> source = new LinkedHashMap<>();
+        source.put("title", "Test");
+        source.put("content", "Body");
+        source.put("url", "https://example.com/");
+        source.put("host", "example.com");
+
+        final Set<String> excludeFields = Set.of("url", "host");
+        final String html = new HtmlIndexExportFormatter().format(source, excludeFields);
+
+        assertFalse(html.contains("fess:url"));
+        assertFalse(html.contains("fess:host"));
+        assertTrue(html.contains("<title>Test</title>"));
+        assertTrue(html.contains("Body"));
+    }
+
+    // --- buildFilePath with JSON formatter tests ---
+
+    @Test
+    public void test_buildFilePath_jsonFormatter_noExtension() {
+        final Path result = indexExportJob.buildFilePath("/export", "https://example.com/docs/guide", new JsonIndexExportFormatter());
+        assertEquals(Path.of("/export/example.com/docs/guide.json"), result);
+    }
+
+    @Test
+    public void test_buildFilePath_jsonFormatter_trailingSlash() {
+        final Path result = indexExportJob.buildFilePath("/export", "https://example.com/docs/", new JsonIndexExportFormatter());
+        assertEquals(Path.of("/export/example.com/docs/index.json"), result);
+    }
+
+    @Test
+    public void test_buildFilePath_jsonFormatter_invalidUrl() {
+        final Path result = indexExportJob.buildFilePath("/export", "not valid %%%", new JsonIndexExportFormatter());
+        assertTrue(result.toString().startsWith("/export/_invalid/"));
+        assertTrue(result.toString().endsWith(".json"));
+    }
+
+    @Test
+    public void test_buildFilePath_jsonFormatter_rootUrl() {
+        final Path result = indexExportJob.buildFilePath("/export", "https://example.com", new JsonIndexExportFormatter());
+        assertEquals(Path.of("/export/example.com/index.json"), result);
+    }
+
+    @Test
+    public void test_buildFilePath_jsonFormatter_existingExtension() {
+        // URL with existing extension should keep it
+        final Path result = indexExportJob.buildFilePath("/export", "https://example.com/page.html", new JsonIndexExportFormatter());
+        assertEquals(Path.of("/export/example.com/page.html"), result);
+    }
+
+    // --- createFormatter() tests ---
+
+    @Test
+    public void test_createFormatter_html() {
+        final IndexExportFormatter formatter = indexExportJob.createFormatter("html");
+        assertTrue(formatter instanceof HtmlIndexExportFormatter);
+    }
+
+    @Test
+    public void test_createFormatter_json() {
+        final IndexExportFormatter formatter = indexExportJob.createFormatter("json");
+        assertTrue(formatter instanceof JsonIndexExportFormatter);
+    }
+
+    @Test
+    public void test_createFormatter_caseInsensitive() {
+        assertTrue(indexExportJob.createFormatter("HTML") instanceof HtmlIndexExportFormatter);
+        assertTrue(indexExportJob.createFormatter("Json") instanceof JsonIndexExportFormatter);
+        assertTrue(indexExportJob.createFormatter("JSON") instanceof JsonIndexExportFormatter);
+    }
+
+    @Test
+    public void test_createFormatter_unsupported() {
+        try {
+            indexExportJob.createFormatter("xml");
+            fail("Expected IllegalArgumentException");
+        } catch (final IllegalArgumentException e) {
+            assertTrue(e.getMessage().contains("xml"));
+        }
+    }
+
+    @Test
+    public void test_createFormatter_null() {
+        try {
+            indexExportJob.createFormatter(null);
+            fail("Expected IllegalArgumentException");
+        } catch (final IllegalArgumentException e) {
+            assertTrue(e.getMessage().contains("null or empty"));
+        }
+    }
+
+    @Test
+    public void test_createFormatter_empty() {
+        try {
+            indexExportJob.createFormatter("");
+            fail("Expected IllegalArgumentException");
+        } catch (final IllegalArgumentException e) {
+            assertTrue(e.getMessage().contains("null or empty"));
+        }
+    }
+
+    @Test
+    public void test_createFormatter_whitespace() {
+        try {
+            indexExportJob.createFormatter("  ");
+            fail("Expected IllegalArgumentException");
+        } catch (final IllegalArgumentException e) {
+            assertTrue(e.getMessage().contains("null or empty"));
+        }
+    }
+
+    @Test
+    public void test_createFormatter_withLeadingTrailingSpaces() {
+        assertTrue(indexExportJob.createFormatter(" html ") instanceof HtmlIndexExportFormatter);
+        assertTrue(indexExportJob.createFormatter(" json ") instanceof JsonIndexExportFormatter);
+    }
+
+    // --- exportDocument with JSON formatter tests ---
+
+    @Test
+    public void test_exportDocument_jsonFormatter_createsFile() {
+        final Map<String, Object> source = new LinkedHashMap<>();
+        source.put("url", "https://example.com/data");
+        source.put("title", "Test");
+        source.put("content", "Hello");
+
+        indexExportJob.exportDocument(source, tempDir.toString(), Collections.emptySet(), new JsonIndexExportFormatter());
+
+        final Path expectedFile = tempDir.resolve("example.com/data.json");
+        assertTrue(Files.exists(expectedFile));
+    }
+
+    @Test
+    public void test_exportDocument_jsonFormatter_fileContent() throws IOException {
+        final Map<String, Object> source = new LinkedHashMap<>();
+        source.put("url", "https://example.com/data");
+        source.put("title", "My Title");
+        source.put("content", "My Content");
+        source.put("boost", 1.5);
+
+        indexExportJob.exportDocument(source, tempDir.toString(), Collections.emptySet(), new JsonIndexExportFormatter());
+
+        final Path file = tempDir.resolve("example.com/data.json");
+        final String content = Files.readString(file, StandardCharsets.UTF_8);
+        assertTrue(content.contains("\"title\": \"My Title\""));
+        assertTrue(content.contains("\"content\": \"My Content\""));
+        assertTrue(content.contains("\"boost\": 1.5"));
+    }
+
+    @Test
+    public void test_exportDocument_jsonFormatter_excludeFields() throws IOException {
+        final Map<String, Object> source = new LinkedHashMap<>();
+        source.put("url", "https://example.com/data");
+        source.put("title", "Test");
+        source.put("cache", "should be excluded");
+        source.put("host", "example.com");
+
+        indexExportJob.exportDocument(source, tempDir.toString(), Set.of("cache"), new JsonIndexExportFormatter());
+
+        final Path file = tempDir.resolve("example.com/data.json");
+        final String content = Files.readString(file, StandardCharsets.UTF_8);
+        assertFalse(content.contains("\"cache\""));
+        assertTrue(content.contains("\"host\": \"example.com\""));
+    }
+
+    @Test
+    public void test_exportDocument_jsonFormatter_skipWithoutUrl() {
+        final Map<String, Object> source = new LinkedHashMap<>();
+        source.put("title", "No URL");
+
+        indexExportJob.exportDocument(source, tempDir.toString(), Collections.emptySet(), new JsonIndexExportFormatter());
+
+        try {
+            assertEquals(0, Files.list(tempDir).count());
+        } catch (final IOException e) {
+            fail("Failed to list temp directory: " + e.getMessage());
+        }
+    }
+
+    // --- execute() with config format tests ---
+
+    @Test
+    public void test_execute_usesConfigFormat_json() throws IOException {
+        final Map<String, Object> doc = new LinkedHashMap<>();
+        doc.put("url", "https://example.com/data");
+        doc.put("title", "Test");
+        doc.put("content", "Body");
+
+        final SearchEngineClient searchEngineClient = new SearchEngineClient() {
+            @Override
+            public long scrollSearch(final String index,
+                    final SearchCondition<org.codelibs.fesen.opensearch.action.search.SearchRequestBuilder> condition,
+                    final BooleanFunction<Map<String, Object>> cursor) {
+                cursor.apply(doc);
+                return 1;
+            }
+        };
+        final FessConfig fessConfig = new TestFessConfig(tempDir.toString(), "cache", "100") {
+            @Override
+            public String getIndexExportFormat() {
+                return "json";
+            }
+        };
+        ComponentUtil.register(searchEngineClient, "searchEngineClient");
+        ComponentUtil.setFessConfig(fessConfig);
+
+        final String result = indexExportJob.execute();
+
+        assertEquals("Exported 1 documents.", result);
+        final Path file = tempDir.resolve("example.com/data.json");
+        assertTrue(Files.exists(file));
+        final String content = Files.readString(file, StandardCharsets.UTF_8);
+        assertTrue(content.contains("\"title\": \"Test\""));
+    }
+
+    @Test
+    public void test_execute_fluentFormatOverridesConfig() throws IOException {
+        final Map<String, Object> doc = new LinkedHashMap<>();
+        doc.put("url", "https://example.com/data");
+        doc.put("title", "Test");
+        doc.put("content", "Body");
+
+        final SearchEngineClient searchEngineClient = new SearchEngineClient() {
+            @Override
+            public long scrollSearch(final String index,
+                    final SearchCondition<org.codelibs.fesen.opensearch.action.search.SearchRequestBuilder> condition,
+                    final BooleanFunction<Map<String, Object>> cursor) {
+                cursor.apply(doc);
+                return 1;
+            }
+        };
+        // Config says html, but fluent API says json
+        final FessConfig fessConfig = new TestFessConfig(tempDir.toString(), "cache", "100");
+        ComponentUtil.register(searchEngineClient, "searchEngineClient");
+        ComponentUtil.setFessConfig(fessConfig);
+
+        final String result = indexExportJob.format("json").execute();
+
+        assertEquals("Exported 1 documents.", result);
+        // Should create .json file, not .html
+        final Path jsonFile = tempDir.resolve("example.com/data.json");
+        assertTrue(Files.exists(jsonFile));
+        assertFalse(Files.exists(tempDir.resolve("example.com/data.html")));
+    }
+
+    @Test
+    public void test_execute_formatAndQueryChaining() {
+        setupMockComponents(Collections.emptyList());
+
+        final String result = indexExportJob.format("json").query(QueryBuilders.matchAllQuery()).execute();
+
+        assertEquals("Exported 0 documents.", result);
+    }
+
+    @Test
+    public void test_execute_queryAndFormatChaining() {
+        setupMockComponents(Collections.emptyList());
+
+        final String result = indexExportJob.query(QueryBuilders.matchAllQuery()).format("json").execute();
+
+        assertEquals("Exported 0 documents.", result);
+    }
+
+    // --- JSON full flow integration tests ---
+
+    @Test
+    public void test_execute_jsonFormat_multipleDocuments() throws IOException {
+        final List<Map<String, Object>> docs = new ArrayList<>();
+        for (int i = 0; i < 3; i++) {
+            final Map<String, Object> doc = new LinkedHashMap<>();
+            doc.put("url", "https://example.com/page" + i);
+            doc.put("title", "Page " + i);
+            doc.put("content", "Content " + i);
+            docs.add(doc);
+        }
+        setupMockComponents(docs);
+
+        final String result = indexExportJob.format("json").execute();
+
+        assertEquals("Exported 3 documents.", result);
+        for (int i = 0; i < 3; i++) {
+            final Path file = tempDir.resolve("example.com/page" + i + ".json");
+            assertTrue(Files.exists(file));
+            final String content = Files.readString(file, StandardCharsets.UTF_8);
+            assertTrue(content.contains("\"title\": \"Page " + i + "\""));
+        }
+    }
+
+    @Test
+    public void test_execute_jsonFormat_fullFlow() throws IOException {
+        final List<Map<String, Object>> docs = new ArrayList<>();
+        final Map<String, Object> doc = new LinkedHashMap<>();
+        doc.put("url", "https://example.com/page");
+        doc.put("title", "Test Title");
+        doc.put("content", "Test Content");
+        doc.put("boost", 1.5);
+        doc.put("anchor", Arrays.asList("http://a.com", "http://b.com"));
+        docs.add(doc);
+
+        setupMockComponents(docs);
+
+        final String result = indexExportJob.format("json").execute();
+
+        assertEquals("Exported 1 documents.", result);
+
+        final Path file = tempDir.resolve("example.com/page.json");
+        assertTrue(Files.exists(file));
+        final String json = Files.readString(file, StandardCharsets.UTF_8);
+        assertTrue(json.contains("\"title\": \"Test Title\""));
+        assertTrue(json.contains("\"content\": \"Test Content\""));
+        assertTrue(json.contains("\"boost\": 1.5"));
+        assertTrue(json.contains("\"anchor\": [\"http://a.com\", \"http://b.com\"]"));
+        assertFalse(json.contains("\"cache\""));
+    }
+
+    private static class TestFessConfig extends FessConfig.SimpleImpl {
+        private static final long serialVersionUID = 1L;
+
+        private final String exportPath;
+        private final String excludeFields;
+        private final String scrollSize;
+
+        TestFessConfig(final String exportPath, final String excludeFields, final String scrollSize) {
+            this.exportPath = exportPath;
+            this.excludeFields = excludeFields;
+            this.scrollSize = scrollSize;
+        }
+
+        @Override
+        public String getIndexExportPath() {
+            return exportPath;
+        }
+
+        @Override
+        public String getIndexExportExcludeFields() {
+            return excludeFields;
+        }
+
+        @Override
+        public String getIndexExportScrollSize() {
+            return scrollSize;
+        }
+
+        @Override
+        public Integer getIndexExportScrollSizeAsInteger() {
+            return Integer.valueOf(scrollSize);
+        }
+
+        @Override
+        public String getIndexDocumentSearchIndex() {
+            return "fess.search";
+        }
+
+        @Override
+        public String getIndexExportFormat() {
+            return "html";
+        }
+    }
+
+    // --- buildFilePath() regression tests for special characters ---
+
+    @Test
+    public void test_buildFilePath_withBrackets() {
+        final Path result =
+                indexExportJob.buildFilePath(tempDir.toString(), "file:///data/[logs]/access.log", new HtmlIndexExportFormatter());
+        assertNotNull(result);
+        // Brackets are invalid in URI syntax, so this should fall back to _invalid/hash path
+        assertTrue(result.toString().startsWith(tempDir.toString() + "/_invalid/"));
+        assertTrue(result.toString().endsWith(".html"));
+    }
+
+    @Test
+    public void test_buildFilePath_withPercent() {
+        final Path result =
+                indexExportJob.buildFilePath(tempDir.toString(), "file:///data/100%/report.txt", new HtmlIndexExportFormatter());
+        assertNotNull(result);
+        // Bare percent is invalid in URI syntax, so this should fall back to _invalid/hash path
+        assertTrue(result.toString().startsWith(tempDir.toString() + "/_invalid/"));
+        assertTrue(result.toString().endsWith(".html"));
+    }
+
+    @Test
+    public void test_buildFilePath_withEncodedUmlaut() {
+        final Path result =
+                indexExportJob.buildFilePath(tempDir.toString(), "http://example.com/%C3%96sterreich/page", new HtmlIndexExportFormatter());
+        assertNotNull(result);
+        // Properly percent-encoded URL should parse successfully (not fall back to _invalid)
+        assertFalse(result.toString().contains("_invalid"));
+        assertTrue(result.toString().contains("example.com"));
+        assertTrue(result.toString().endsWith(".html"));
+    }
+
+    @Test
+    public void test_buildFilePath_normalUrl() {
+        final Path result =
+                indexExportJob.buildFilePath(tempDir.toString(), "http://example.com/path/page.html", new HtmlIndexExportFormatter());
+        assertNotNull(result);
+        assertFalse(result.toString().contains("_invalid"));
+        assertTrue(result.toString().contains("example.com"));
+        assertTrue(result.toString().contains("path"));
+        assertTrue(result.toString().endsWith("page.html"));
+    }
+
+    // --- path traversal prevention tests ---
+
+    @Test
+    public void test_buildFilePath_dotDotTraversal() {
+        final Path result =
+                indexExportJob.buildFilePath(tempDir.toString(), "http://example.com/foo/../../etc/passwd", new HtmlIndexExportFormatter());
+        assertNotNull(result);
+        assertTrue(result.normalize().startsWith(tempDir.normalize()), "Path must stay within base directory: " + result);
+    }
+
+    @Test
+    public void test_buildFilePath_dotDotStripped() {
+        final Path result =
+                indexExportJob.buildFilePath(tempDir.toString(), "http://example.com/foo/../../etc/passwd", new HtmlIndexExportFormatter());
+        assertNotNull(result);
+        assertFalse(result.toString().contains(".."));
+        assertTrue(result.normalize().startsWith(tempDir.normalize()), "Path must stay within base directory: " + result);
+    }
+
+    @Test
+    public void test_buildFilePath_singleDotIgnored() {
+        final Path result =
+                indexExportJob.buildFilePath(tempDir.toString(), "http://example.com/./path/./page.html", new HtmlIndexExportFormatter());
+        assertNotNull(result);
+        assertFalse(result.toString().contains("_invalid"));
+        assertTrue(result.normalize().startsWith(tempDir.normalize()), "Path must stay within base directory: " + result);
+        assertTrue(result.toString().contains("example.com"));
+        assertTrue(result.toString().endsWith("page.html"));
+    }
+
+    @Test
+    public void test_buildFilePath_multipleDotDotSequences() {
+        final Path result = indexExportJob.buildFilePath(tempDir.toString(), "http://example.com/a/b/c/../../../../../../../tmp/evil",
+                new HtmlIndexExportFormatter());
+        assertNotNull(result);
+        assertTrue(result.normalize().startsWith(tempDir.normalize()), "Path must stay within base directory: " + result);
+    }
+
+    @Test
+    public void test_buildFilePath_percentEncodedDotDot() {
+        final Path result = indexExportJob.buildFilePath(tempDir.toString(), "http://example.com/%2e%2e/%2e%2e/etc/passwd",
+                new HtmlIndexExportFormatter());
+        assertNotNull(result);
+        assertFalse(result.toString().contains(".."));
+        assertTrue(result.normalize().startsWith(tempDir.normalize()), "Path must stay within base directory: " + result);
+    }
+
+    @Test
+    public void test_buildFilePath_backslashTraversal() {
+        final Path result = indexExportJob.buildFilePath(tempDir.toString(), "http://example.com/foo\\..\\..\\etc\\passwd",
+                new HtmlIndexExportFormatter());
+        assertNotNull(result);
+        assertTrue(result.normalize().startsWith(tempDir.normalize()), "Path must stay within base directory: " + result);
+    }
+
+    @Test
+    public void test_buildFilePath_onlyDotDotComponents() {
+        final Path result =
+                indexExportJob.buildFilePath(tempDir.toString(), "http://example.com/../../../", new HtmlIndexExportFormatter());
+        assertNotNull(result);
+        assertTrue(result.normalize().startsWith(tempDir.normalize()), "Path must stay within base directory: " + result);
+    }
+
+    @Test
+    public void test_buildFilePath_encodedSlashTraversal() {
+        final Path result =
+                indexExportJob.buildFilePath(tempDir.toString(), "http://example.com/%2Fetc%2Fpasswd", new HtmlIndexExportFormatter());
+        assertNotNull(result);
+        assertTrue(result.normalize().startsWith(tempDir.normalize()), "Path must stay within base directory: " + result);
+    }
+
+    // --- symlink traversal prevention tests ---
+
+    @Test
+    public void test_exportDocument_symlinkIntermediateDir() throws Exception {
+        final Path outsideDir = Files.createTempDirectory("outside");
+        try {
+            final Path hostDir = tempDir.resolve("evil.com");
+            Files.createSymbolicLink(hostDir, outsideDir);
+
+            final Map<String, Object> source = new LinkedHashMap<>();
+            source.put("url", "http://evil.com/secret.html");
+            source.put("content", "should not be written outside");
+
+            indexExportJob.exportDocument(source, tempDir.toString(), Collections.emptySet(), new HtmlIndexExportFormatter());
+
+            assertFalse(Files.exists(outsideDir.resolve("secret.html")), "File must not be written outside base directory via symlink");
+        } finally {
+            Files.deleteIfExists(tempDir.resolve("evil.com"));
+            deleteRecursive(outsideDir);
+        }
+    }
+
+    @Test
+    public void test_exportDocument_symlinkAtLeafFile() throws Exception {
+        final Path outsideDir = Files.createTempDirectory("outside");
+        try {
+            final Path outsideTarget = outsideDir.resolve("stolen.html");
+            Files.writeString(outsideTarget, "original", StandardCharsets.UTF_8);
+
+            final Path hostDir = tempDir.resolve("example.com");
+            Files.createDirectories(hostDir);
+            final Path symlinkFile = hostDir.resolve("page.html");
+            Files.createSymbolicLink(symlinkFile, outsideTarget);
+
+            final Map<String, Object> source = new LinkedHashMap<>();
+            source.put("url", "http://example.com/page.html");
+            source.put("content", "overwritten via symlink");
+
+            indexExportJob.exportDocument(source, tempDir.toString(), Collections.emptySet(), new HtmlIndexExportFormatter());
+
+            assertEquals("original", Files.readString(outsideTarget));
+        } finally {
+            Files.deleteIfExists(tempDir.resolve("example.com/page.html"));
+            Files.deleteIfExists(tempDir.resolve("example.com"));
+            deleteRecursive(outsideDir);
+        }
+    }
+}

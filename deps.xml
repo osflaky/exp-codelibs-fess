@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project name="deps" basedir=".">
+	<property name="target.dir" value="${basedir}/target/deps" />
+	<property name="webinf.dir" value="${basedir}/src/main/webapp/WEB-INF" />
+	<property name="crawler.dir" value="${basedir}/src/main/webapp/WEB-INF/env/crawler" />
+	<property name="suggest.dir" value="${basedir}/src/main/webapp/WEB-INF/env/suggest" />
+	<property name="thumbnail.dir" value="${basedir}/src/main/webapp/WEB-INF/env/thumbnail" />
+	<property name="chunk.dir" value="${basedir}/src/main/webapp/WEB-INF/env/chunk" />
+	<property name="site.dir" value="${basedir}/src/main/webapp/WEB-INF/site" />
+	<!-- property name="kopf.version" value="15.8.0" / -->
+	<!-- property name="kopf.url" value="https://github.com/codelibs/fess-kopf/archive/refs/tags/v${kopf.version}.zip" / -->
+	<property name="kopf.version" value="main" />
+	<property name="kopf.url" value="https://github.com/codelibs/fess-kopf/archive/refs/heads/${kopf.version}.zip" />
+
+	<!-- Maven Repository -->
+	<property name="maven.snapshot.repo.url" value="https://central.sonatype.com/repository/maven-snapshots" />
+	<property name="maven.release.repo.url" value="https://repo1.maven.org/maven2" />
+
+	<target name="install.jars">
+		<mkdir dir="${target.dir}" />
+		<delete dir="${webinf.dir}/lib" />
+		<mkdir dir="${webinf.dir}/lib" />
+		<delete dir="${crawler.dir}/lib" />
+		<mkdir dir="${crawler.dir}/lib" />
+		<delete dir="${suggest.dir}/lib" />
+		<mkdir dir="${suggest.dir}/lib" />
+		<delete dir="${thumbnail.dir}/lib" />
+		<mkdir dir="${thumbnail.dir}/lib" />
+		<delete dir="${chunk.dir}/lib" />
+		<mkdir dir="${chunk.dir}/lib" />
+		<!-- annotation-api -->
+		<antcall target="install.env.jar">
+			<param name="repo.url" value="${maven.release.repo.url}" />
+			<param name="jar.groupId" value="jakarta/annotation" />
+			<param name="jar.artifactId" value="jakarta.annotation-api" />
+			<param name="jar.version" value="2.1.1" />
+			<param name="file.version" value="2.1.1" />
+		</antcall>
+		<!-- kopf -->
+		<get dest="${target.dir}/kopf.zip">
+			<url url="${kopf.url}" />
+		</get>
+		<delete dir="${site.dir}/kopf" />
+		<unzip dest="${site.dir}/kopf" src="${target.dir}/kopf.zip">
+			<patternset>
+				<include name="fess-kopf-${kopf.version}/_site/**" />
+			</patternset>
+			<cutdirsmapper dirs="2" />
+		</unzip>
+		<delete>
+			<fileset dir="${webinf.dir}/plugin">
+				<include name="**/*.jar" />
+			</fileset>
+		</delete>
+	</target>
+
+	<target name="install.env.jar">
+		<get dest="${target.dir}">
+			<url url="${repo.url}/${jar.groupId}/${jar.artifactId}/${jar.version}/${jar.artifactId}-${file.version}.jar" />
+		</get>
+		<copy file="${target.dir}/${jar.artifactId}-${file.version}.jar" todir="${crawler.dir}/lib" />
+		<copy file="${target.dir}/${jar.artifactId}-${file.version}.jar" todir="${suggest.dir}/lib" />
+		<copy file="${target.dir}/${jar.artifactId}-${file.version}.jar" todir="${thumbnail.dir}/lib" />
+		<copy file="${target.dir}/${jar.artifactId}-${file.version}.jar" todir="${chunk.dir}/lib" />
+	</target>
+
+</project>

@@ -1,0 +1,571 @@
+/*
+ * Copyright 2012-2025 CodeLibs Project and the Others.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND,
+ * either express or implied. See the License for the specific language
+ * governing permissions and limitations under the License.
+ */
+package org.codelibs.fess.helper;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.BiFunction;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+import org.apache.logging.log4j.Level;
+import org.codelibs.fess.Constants;
+import org.codelibs.fess.opensearch.config.exentity.PathMapping;
+import org.codelibs.fess.script.ScriptEngine;
+import org.codelibs.fess.script.ScriptEngineFactory;
+import org.codelibs.fess.unit.LogCapturingAppender;
+import org.codelibs.fess.unit.UnitFessTestCase;
+import org.codelibs.fess.util.ComponentUtil;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInfo;
+
+public class PathMappingHelperTest extends UnitFessTestCase {
+
+    public PathMappingHelper pathMappingHelper;
+
+    @Override
+    protected void setUp(TestInfo testInfo) throws Exception {
+        super.setUp(testInfo);
+        ComponentUtil.register(new ScriptEngineFactory(), "scriptEngineFactory");
+        pathMappingHelper = new PathMappingHelper();
+        pathMappingHelper.init();
+    }
+
+    @Test
+    public void test_setPathMappingList() {
+        final String sessionId = "test";
+        final List<PathMapping> pathMappingList = new ArrayList<PathMapping>();
+
+        assertNull(pathMappingHelper.getPathMappingList(sessionId));
+        assertNull(pathMappingHelper.getPathMappingList(sessionId + "1"));
+        pathMappingHelper.setPathMappingList(sessionId, pathMappingList);
+        assertNotNull(pathMappingHelper.getPathMappingList(sessionId));
+        assertNull(pathMappingHelper.getPathMappingList(sessionId + "1"));
+        pathMappingHelper.removePathMappingList(sessionId);
+        assertNull(pathMappingHelper.getPathMappingList(sessionId));
+        assertNull(pathMappingHelper.getPathMappingList(sessionId + "1"));
+
+    }
+
+    @Test
+    public void test_replaceUrl() {
+        final String sessionId = "test";
+        final List<PathMapping> pathMappingList = new ArrayList<PathMapping>();
+        final PathMapping pathMapping = new PathMapping();
+        pathMapping.setRegex("file:///home/");
+        pathMapping.setReplacement("http://localhost/");
+        pathMappingList.add(pathMapping);
+
+        pathMappingHelper.setPathMappingList(sessionId, pathMappingList);
+
+        final String url = "file:///home/user/";
+        assertEquals("http://localhost/user/", pathMappingHelper.replaceUrl(sessionId, url));
+    }
+
+    @Test
+    public void test_replaceUrls() {
+        final List<PathMapping> pathMappingList = new ArrayList<PathMapping>();
+        final PathMapping pathMapping = new PathMapping();
+        pathMapping.setRegex("file:///home/");
+        pathMapping.setReplacement("http://localhost/");
+        pathMappingList.add(pathMapping);
+
+        pathMappingHelper.cachedPathMappingList = pathMappingList;
+
+        String text = "\"file:///home/\"";
+        assertEquals("\"http://localhost/\"", pathMappingHelper.replaceUrls(text));
+
+        text = "\"file:///home/user/\"";
+        assertEquals("\"http://localhost/user/\"", pathMappingHelper.replaceUrls(text));
+
+        text = "\"aaafile:///home/user/\"";
+        assertEquals("\"aaahttp://localhost/user/\"", pathMappingHelper.replaceUrls(text));
+
+        text = "aaa\"file:///home/user/\"bbb";
+        assertEquals("aaa\"http://localhost/user/\"bbb", pathMappingHelper.replaceUrls(text));
+    }
+
+    @Test
+    public void test_setPathMappingList_withNullSessionId() {
+        final List<PathMapping> pathMappingList = new ArrayList<PathMapping>();
+        pathMappingHelper.setPathMappingList(null, pathMappingList);
+        assertNull(pathMappingHelper.getPathMappingList("test"));
+    }
+
+    @Test
+    public void test_setPathMappingList_withNullList() {
+        final String sessionId = "test";
+        final List<PathMapping> pathMappingList = new ArrayList<PathMapping>();
+        pathMappingHelper.setPathMappingList(sessionId, pathMappingList);
+        assertNotNull(pathMappingHelper.getPathMappingList(sessionId));
+
+        pathMappingHelper.setPathMappingList(sessionId, null);
+        assertNull(pathMappingHelper.getPathMappingList(sessionId));
+    }
+
+    @Test
+    public void test_removePathMappingList_withNullSessionId() {
+        pathMappingHelper.removePathMappingList(null);
+    }
+
+    @Test
+    public void test_getPathMappingList_withNullSessionId() {
+        assertNull(pathMappingHelper.getPathMappingList(null));
+    }
+
+    @Test
+    public void test_replaceUrl_withNullSessionId() {
+        final String url = "file:///home/user/";
+        assertEquals(url, pathMappingHelper.replaceUrl((String) null, url));
+    }
+
+    @Test
+    public void test_replaceUrl_withNonExistentSessionId() {
+        final String url = "file:///home/user/";
+        assertEquals(url, pathMappingHelper.replaceUrl("nonexistent", url));
+    }
+
+    @Test
+    public void test_replaceUrl_withEmptyList() {
+        final String sessionId = "test";
+        final List<PathMapping> pathMappingList = new ArrayList<PathMapping>();
+        pathMappingHelper.setPathMappingList(sessionId, pathMappingList);
+
+        final String url = "file:///home/user/";
+        assertEquals(url, pathMappingHelper.replaceUrl(sessionId, url));
+    }
+
+    @Test
+    public void test_replaceUrl_withMultiplePathMappings() {
+        final String sessionId = "test";
+        final List<PathMapping> pathMappingList = new ArrayList<PathMapping>();
+
+        final PathMapping pathMapping1 = new PathMapping();
+        pathMapping1.setRegex("file:///home/");
+        pathMapping1.setReplacement("http://localhost/");
+        pathMappingList.add(pathMapping1);
+
+        final PathMapping pathMapping2 = new PathMapping();
+        pathMapping2.setRegex("http://localhost/");
+        pathMapping2.setReplacement("https://server/");
+        pathMappingList.add(pathMapping2);
+
+        pathMappingHelper.setPathMappingList(sessionId, pathMappingList);
+
+        final String url = "file:///home/user/";
+        assertEquals("https://server/user/", pathMappingHelper.replaceUrl(sessionId, url));
+    }
+
+    @Test
+    public void test_replaceUrls_withNullReplacement() {
+        final List<PathMapping> pathMappingList = new ArrayList<PathMapping>();
+        final PathMapping pathMapping = new PathMapping();
+        pathMapping.setRegex("file:///home/");
+        pathMapping.setReplacement(null);
+        pathMappingList.add(pathMapping);
+
+        pathMappingHelper.cachedPathMappingList = pathMappingList;
+
+        String text = "\"file:///home/user/\"";
+        assertEquals("\"user/\"", pathMappingHelper.replaceUrls(text));
+    }
+
+    @Test
+    public void test_replaceUrls_withEmptyReplacement() {
+        final List<PathMapping> pathMappingList = new ArrayList<PathMapping>();
+        final PathMapping pathMapping = new PathMapping();
+        pathMapping.setRegex("file:///home/");
+        pathMapping.setReplacement("");
+        pathMappingList.add(pathMapping);
+
+        pathMappingHelper.cachedPathMappingList = pathMappingList;
+
+        String text = "\"file:///home/user/\"";
+        assertEquals("\"user/\"", pathMappingHelper.replaceUrls(text));
+    }
+
+    @Test
+    public void test_replaceUrls_withNullCachedList() {
+        pathMappingHelper.cachedPathMappingList = null;
+        String text = "\"file:///home/user/\"";
+        assertEquals(text, pathMappingHelper.replaceUrls(text));
+    }
+
+    @Test
+    public void test_replaceUrl_withNullCachedList() {
+        pathMappingHelper.cachedPathMappingList = null;
+        String url = "file:///home/user/";
+        String result = pathMappingHelper.replaceUrl(url);
+        assertNotNull(result);
+    }
+
+    @Test
+    public void test_replaceUrls_withMultipleQuotedStrings() {
+        final List<PathMapping> pathMappingList = new ArrayList<PathMapping>();
+        final PathMapping pathMapping = new PathMapping();
+        pathMapping.setRegex("file:///home/");
+        pathMapping.setReplacement("http://localhost/");
+        pathMappingList.add(pathMapping);
+
+        pathMappingHelper.cachedPathMappingList = pathMappingList;
+
+        String text = "\"file:///home/user1/\" and \"file:///home/user2/\"";
+        assertEquals("\"http://localhost/user1/\" and \"http://localhost/user2/\"", pathMappingHelper.replaceUrls(text));
+    }
+
+    @Test
+    public void test_replaceUrls_withNoQuotes() {
+        final List<PathMapping> pathMappingList = new ArrayList<PathMapping>();
+        final PathMapping pathMapping = new PathMapping();
+        pathMapping.setRegex("file:///home/");
+        pathMapping.setReplacement("http://localhost/");
+        pathMappingList.add(pathMapping);
+
+        pathMappingHelper.cachedPathMappingList = pathMappingList;
+
+        String text = "file:///home/user/";
+        assertEquals("file:///home/user/", pathMappingHelper.replaceUrls(text));
+    }
+
+    @Test
+    public void test_getProcessTypeList_crawlerMode() {
+        System.setProperty("lasta.env", Constants.EXECUTE_TYPE_CRAWLER);
+        try {
+            final List<String> ptList = pathMappingHelper.getProcessTypeList();
+            assertEquals(1, ptList.size());
+            assertEquals(Constants.PROCESS_TYPE_REPLACE, ptList.get(0));
+        } finally {
+            System.clearProperty("lasta.env");
+        }
+    }
+
+    @Test
+    public void test_getProcessTypeList_defaultMode() {
+        System.clearProperty("lasta.env");
+        final List<String> ptList = pathMappingHelper.getProcessTypeList();
+        assertEquals(2, ptList.size());
+        assertTrue(ptList.contains(Constants.PROCESS_TYPE_DISPLAYING));
+        assertTrue(ptList.contains(Constants.PROCESS_TYPE_BOTH));
+    }
+
+    @Test
+    public void test_getProcessTypeList_nonCrawlerMode() {
+        System.setProperty("lasta.env", "other");
+        try {
+            final List<String> ptList = pathMappingHelper.getProcessTypeList();
+            assertEquals(2, ptList.size());
+            assertTrue(ptList.contains(Constants.PROCESS_TYPE_DISPLAYING));
+            assertTrue(ptList.contains(Constants.PROCESS_TYPE_BOTH));
+        } finally {
+            System.clearProperty("lasta.env");
+        }
+    }
+
+    @Test
+    public void test_createPathMatcher_encodeUrl() {
+        final Pattern pattern = Pattern.compile("test");
+        final Matcher matcher = pattern.matcher("test");
+        final BiFunction<String, Matcher, String> pathMatcher = pathMappingHelper.createPathMatcher(matcher, "function:encodeUrl");
+
+        String result = pathMatcher.apply("http://example.com/test path", matcher);
+        assertEquals("http://example.com/test+path", result);
+    }
+
+    @Test
+    public void test_createPathMatcher_normalReplacement() {
+        final Pattern pattern = Pattern.compile("test");
+        final Matcher matcher = pattern.matcher("test");
+        final BiFunction<String, Matcher, String> pathMatcher = pathMappingHelper.createPathMatcher(matcher, "replacement");
+
+        String result = pathMatcher.apply("test", matcher);
+        assertEquals("replacement", result);
+    }
+
+    @Test
+    public void test_load_withoutPathMappingBhv() {
+        final PathMappingHelper helper = new PathMappingHelper();
+        int result = helper.load();
+        assertEquals(0, result);
+    }
+
+    @Test
+    public void test_init_called() {
+        final PathMappingHelper helper = new PathMappingHelper();
+        helper.init();
+        assertNotNull(helper.cachedPathMappingList);
+    }
+
+    @Test
+    public void test_replaceUrl_withEmptyUrl() {
+        final String sessionId = "test";
+        final List<PathMapping> pathMappingList = new ArrayList<PathMapping>();
+        final PathMapping pathMapping = new PathMapping();
+        pathMapping.setRegex("file:///home/");
+        pathMapping.setReplacement("http://localhost/");
+        pathMappingList.add(pathMapping);
+
+        pathMappingHelper.setPathMappingList(sessionId, pathMappingList);
+
+        final String url = "";
+        assertEquals("", pathMappingHelper.replaceUrl(sessionId, url));
+    }
+
+    @Test
+    public void test_replaceUrls_withEmptyText() {
+        final List<PathMapping> pathMappingList = new ArrayList<PathMapping>();
+        final PathMapping pathMapping = new PathMapping();
+        pathMapping.setRegex("file:///home/");
+        pathMapping.setReplacement("http://localhost/");
+        pathMappingList.add(pathMapping);
+
+        pathMappingHelper.cachedPathMappingList = pathMappingList;
+
+        String text = "";
+        assertEquals("", pathMappingHelper.replaceUrls(text));
+    }
+
+    @Test
+    public void test_replaceUrl_displayMode() {
+        final List<PathMapping> pathMappingList = new ArrayList<PathMapping>();
+        final PathMapping pathMapping = new PathMapping();
+        pathMapping.setRegex("file:///home/");
+        pathMapping.setReplacement("http://localhost/");
+        pathMappingList.add(pathMapping);
+
+        pathMappingHelper.cachedPathMappingList = pathMappingList;
+
+        final String url = "file:///home/user/";
+        assertEquals("http://localhost/user/", pathMappingHelper.replaceUrl(url));
+    }
+
+    @Test
+    public void test_replaceUrl_displayMode_withEmptyUrl() {
+        final List<PathMapping> pathMappingList = new ArrayList<PathMapping>();
+        final PathMapping pathMapping = new PathMapping();
+        pathMapping.setRegex("file:///home/");
+        pathMapping.setReplacement("http://localhost/");
+        pathMappingList.add(pathMapping);
+
+        pathMappingHelper.cachedPathMappingList = pathMappingList;
+
+        final String url = "";
+        assertEquals("", pathMappingHelper.replaceUrl(url));
+    }
+
+    @Test
+    public void test_replaceUrl_withComplexRegex() {
+        final String sessionId = "test";
+        final List<PathMapping> pathMappingList = new ArrayList<PathMapping>();
+        final PathMapping pathMapping = new PathMapping();
+        pathMapping.setRegex("file:///(\\w+)/");
+        pathMapping.setReplacement("http://localhost/$1/");
+        pathMappingList.add(pathMapping);
+
+        pathMappingHelper.setPathMappingList(sessionId, pathMappingList);
+
+        final String url = "file:///home/user/";
+        assertEquals("http://localhost/home/user/", pathMappingHelper.replaceUrl(sessionId, url));
+    }
+
+    @Test
+    public void test_replaceUrls_withSpecialCharacters() {
+        final List<PathMapping> pathMappingList = new ArrayList<PathMapping>();
+        final PathMapping pathMapping = new PathMapping();
+        pathMapping.setRegex("file:///home/");
+        pathMapping.setReplacement("http://localhost/");
+        pathMappingList.add(pathMapping);
+
+        pathMappingHelper.cachedPathMappingList = pathMappingList;
+
+        String text = "\"file:///home/user with spaces/\"";
+        assertEquals("\"http://localhost/user with spaces/\"", pathMappingHelper.replaceUrls(text));
+    }
+
+    @Test
+    public void test_replaceUrl_withSpecialCharacters() {
+        final String sessionId = "test";
+        final List<PathMapping> pathMappingList = new ArrayList<PathMapping>();
+        final PathMapping pathMapping = new PathMapping();
+        pathMapping.setRegex("file:///home/");
+        pathMapping.setReplacement("http://localhost/");
+        pathMappingList.add(pathMapping);
+
+        pathMappingHelper.setPathMappingList(sessionId, pathMappingList);
+
+        final String url = "file:///home/user with spaces/";
+        assertEquals("http://localhost/user with spaces/", pathMappingHelper.replaceUrl(sessionId, url));
+    }
+
+    @Test
+    public void test_replaceUrl_javascriptPrefix() {
+        final ScriptEngineFactory factory = new ScriptEngineFactory();
+        factory.add("javascript", (template, paramMap) -> "js:" + paramMap.get("url"));
+        ComponentUtil.register(factory, "scriptEngineFactory");
+
+        final PathMappingHelper helper = new PathMappingHelper();
+        final PathMapping pathMapping = new PathMapping();
+        pathMapping.setRegex("^http://example.com/");
+        pathMapping.setReplacement("javascript:url");
+        final List<PathMapping> list = new ArrayList<>();
+        list.add(pathMapping);
+
+        assertEquals("js:http://example.com/a.html", helper.replaceUrl(list, "http://example.com/a.html"));
+    }
+
+    @Test
+    public void test_replaceUrl_unknownPrefixIsPlainReplacement() {
+        final ScriptEngineFactory factory = new ScriptEngineFactory();
+        ComponentUtil.register(factory, "scriptEngineFactory");
+
+        final PathMappingHelper helper = new PathMappingHelper();
+        final PathMapping pathMapping = new PathMapping();
+        pathMapping.setRegex("^http://example.com/");
+        pathMapping.setReplacement("https://example.net/");
+        final List<PathMapping> list = new ArrayList<>();
+        list.add(pathMapping);
+
+        assertEquals("https://example.net/a.html", helper.replaceUrl(list, "http://example.com/a.html"));
+    }
+
+    @Test
+    public void test_replaceUrl_groovyPrefix() {
+        final ScriptEngineFactory factory = new ScriptEngineFactory();
+        factory.add("groovy", (template, paramMap) -> "groovy:" + paramMap.get("url"));
+        ComponentUtil.register(factory, "scriptEngineFactory");
+
+        final PathMappingHelper helper = new PathMappingHelper();
+        final PathMapping pathMapping = new PathMapping();
+        pathMapping.setRegex("^http://example.com/");
+        pathMapping.setReplacement("groovy:url");
+        final List<PathMapping> list = new ArrayList<>();
+        list.add(pathMapping);
+
+        assertEquals("groovy:http://example.com/a.html", helper.replaceUrl(list, "http://example.com/a.html"));
+    }
+
+    @Test
+    public void test_replaceUrl_missingGroovyEngineLeavesUrlUnchanged() {
+        ComponentUtil.register(new ScriptEngineFactory(), "scriptEngineFactory");
+
+        final PathMappingHelper helper = new PathMappingHelper();
+        final PathMapping pathMapping = new PathMapping();
+        pathMapping.setRegex("^http://example.com/");
+        pathMapping.setReplacement("groovy:url");
+        final List<PathMapping> list = new ArrayList<>();
+        list.add(pathMapping);
+
+        assertEquals("http://example.com/a.html", helper.replaceUrl(list, "http://example.com/a.html"));
+    }
+
+    @Test
+    public void test_createPathMatcher_missingGroovyEngineDoesNotThrowOnScript() {
+        ComponentUtil.register(new ScriptEngineFactory(), "scriptEngineFactory");
+
+        final PathMappingHelper helper = new PathMappingHelper();
+        final String url = "http://localhost/docs/en/intro.html";
+        final Matcher matcher = Pattern.compile("http://localhost/docs/en/(.*)").matcher(url);
+        assertTrue(matcher.find());
+        final BiFunction<String, Matcher, String> pathMatcher =
+                helper.createPathMatcher(matcher, "groovy:\"http://mapped.invalid/en-${matcher.group(1)}\"");
+
+        assertEquals(url, pathMatcher.apply(url, matcher));
+    }
+
+    @Test
+    public void test_replaceUrl_missingGroovyEngineScriptLeavesUrlAndLogsNoFailure() {
+        ComponentUtil.register(new ScriptEngineFactory(), "scriptEngineFactory");
+
+        final PathMappingHelper helper = new PathMappingHelper();
+        final PathMapping pathMapping = new PathMapping();
+        pathMapping.setRegex("http://localhost/docs/en/(.*)");
+        pathMapping.setReplacement("groovy:\"http://mapped.invalid/en-${matcher.group(1)}\"");
+        final List<PathMapping> list = new ArrayList<>();
+        list.add(pathMapping);
+
+        final LogCapturingAppender pathMappingLog = LogCapturingAppender.attach(PathMapping.class);
+        final LogCapturingAppender helperLog = LogCapturingAppender.attach(PathMappingHelper.class);
+        try {
+            assertEquals("http://localhost/docs/en/intro.html", helper.replaceUrl(list, "http://localhost/docs/en/intro.html"));
+            assertEquals("http://localhost/docs/en/guide.html", helper.replaceUrl(list, "http://localhost/docs/en/guide.html"));
+
+            assertTrue(pathMappingLog.eventsAt(Level.WARN).isEmpty(), "unexpected warnings: " + pathMappingLog.renderedEvents());
+            assertEquals(1, helperLog.warnings().size());
+            assertTrue(helperLog.warnings().get(0).contains("fess-script-groovy"), helperLog.warnings().toString());
+        } finally {
+            pathMappingLog.detach();
+            helperLog.detach();
+        }
+    }
+
+    @Test
+    public void test_replaceUrl_unregisteredPrefixKeepsGroupReferences() {
+        ComponentUtil.register(new ScriptEngineFactory(), "scriptEngineFactory");
+
+        final PathMappingHelper helper = new PathMappingHelper();
+        final PathMapping pathMapping = new PathMapping();
+        pathMapping.setRegex("^file:/share/(.*)");
+        pathMapping.setReplacement("https://files.example.com/$1");
+        final List<PathMapping> list = new ArrayList<>();
+        list.add(pathMapping);
+
+        assertEquals("https://files.example.com/a/b.txt", helper.replaceUrl(list, "file:/share/a/b.txt"));
+    }
+
+    @Test
+    public void test_replaceUrl_plainReplacementWhenEngineLookupFails() {
+        ComponentUtil.register(new ScriptEngineFactory() {
+            @Override
+            public boolean hasScriptEngine(final String name) {
+                throw new IllegalStateException("no script engine registry");
+            }
+        }, "scriptEngineFactory");
+
+        final PathMappingHelper helper = new PathMappingHelper();
+        final PathMapping pathMapping = new PathMapping();
+        pathMapping.setRegex("ftp:");
+        pathMapping.setReplacement("file:");
+        final List<PathMapping> list = new ArrayList<>();
+        list.add(pathMapping);
+
+        assertEquals("file:/home/taro/test.txt", helper.replaceUrl(list, "ftp:/home/taro/test.txt"));
+    }
+
+    @Test
+    public void test_replaceUrl_engineResolvedOncePerReplacement() {
+        final AtomicInteger lookupCount = new AtomicInteger();
+        final ScriptEngineFactory factory = new ScriptEngineFactory() {
+            @Override
+            public ScriptEngine getScriptEngine(final String name) {
+                lookupCount.incrementAndGet();
+                return super.getScriptEngine(name);
+            }
+        };
+        factory.add("javascript", (template, paramMap) -> "js:" + paramMap.get("url"));
+        ComponentUtil.register(factory, "scriptEngineFactory");
+
+        final PathMappingHelper helper = new PathMappingHelper();
+        final PathMapping pathMapping = new PathMapping();
+        pathMapping.setRegex("^http://example.com/");
+        pathMapping.setReplacement("javascript:url");
+        final List<PathMapping> list = new ArrayList<>();
+        list.add(pathMapping);
+
+        assertEquals("js:http://example.com/a.html", helper.replaceUrl(list, "http://example.com/a.html"));
+        assertEquals("js:http://example.com/b.html", helper.replaceUrl(list, "http://example.com/b.html"));
+        assertEquals(1, lookupCount.get());
+    }
+}

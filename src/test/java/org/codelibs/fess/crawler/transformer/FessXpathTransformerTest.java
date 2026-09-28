@@ -1,0 +1,1639 @@
+/*
+ * Copyright 2012-2025 CodeLibs Project and the Others.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND,
+ * either express or implied. See the License for the specific language
+ * governing permissions and limitations under the License.
+ */
+package org.codelibs.fess.crawler.transformer;
+
+import java.io.ByteArrayInputStream;
+import java.io.InputStream;
+import java.io.StringWriter;
+import java.lang.reflect.Field;
+import java.net.URL;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
+
+import javax.xml.transform.OutputKeys;
+import javax.xml.transform.TransformerFactory;
+import javax.xml.transform.dom.DOMSource;
+import javax.xml.transform.stream.StreamResult;
+
+import org.apache.groovy.util.Maps;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+import org.codelibs.core.lang.ClassUtil;
+import org.codelibs.core.lang.FieldUtil;
+import org.codelibs.core.misc.ValueHolder;
+import org.codelibs.fess.crawler.builder.RequestDataBuilder;
+import org.codelibs.fess.crawler.entity.RequestData;
+import org.codelibs.fess.crawler.entity.ResponseData;
+import org.codelibs.fess.crawler.entity.ResultData;
+import org.codelibs.fess.crawler.exception.ChildUrlsException;
+import org.codelibs.fess.crawler.serializer.DataSerializer;
+import org.codelibs.fess.crawler.util.FieldConfigs;
+import org.codelibs.fess.helper.CrawlingConfigHelper;
+import org.codelibs.fess.helper.CrawlingInfoHelper;
+import org.codelibs.fess.helper.DocumentHelper;
+import org.codelibs.fess.helper.FileTypeHelper;
+import org.codelibs.fess.helper.LabelTypeHelper;
+import org.codelibs.fess.helper.LabelTypeHelper.LabelTypePattern;
+import org.codelibs.fess.helper.PathMappingHelper;
+import org.codelibs.fess.helper.ProtocolHelper;
+import org.codelibs.fess.helper.SystemHelper;
+import org.codelibs.fess.mylasta.direction.FessConfig;
+import org.codelibs.fess.opensearch.config.exentity.CrawlingConfig.ConfigName;
+import org.codelibs.fess.opensearch.config.exentity.CrawlingConfig.Param.Config;
+import org.codelibs.fess.opensearch.config.exentity.WebConfig;
+import org.codelibs.fess.unit.UnitFessTestCase;
+import org.codelibs.fess.util.ComponentUtil;
+import org.codelibs.fess.util.MemoryUtil;
+import org.codelibs.nekohtml.parsers.DOMParser;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInfo;
+import org.w3c.dom.Document;
+import org.w3c.dom.Node;
+import org.xml.sax.InputSource;
+
+public class FessXpathTransformerTest extends UnitFessTestCase {
+    private static final Logger logger = LogManager.getLogger(FessXpathTransformerTest.class);
+
+    @Override
+    protected void setUp(TestInfo testInfo) throws Exception {
+        super.setUp(testInfo);
+        ComponentUtil.register(new DataSerializer(), "dataSerializer");
+        // Register protocolHelper - it doesn't need FessConfig for the methods used in tests
+        ComponentUtil.register(new ProtocolHelper(), "protocolHelper");
+    }
+
+    @Test
+    public void test_transform() throws Exception {
+        String data = "<html><head><title>Test</title></head><body><h1>Header1</h1><p>This is a pen.</p></body></html>";
+
+        final FessXpathTransformer fessXpathTransformer = new FessXpathTransformer();
+        fessXpathTransformer.init();
+        final String sessionId = registerCrawlingHelpers();
+
+        System.gc();
+        long current = MemoryUtil.getUsedMemory();
+        for (int i = 0; i < 10000; i++) {
+            if (i % 1000 == 0) {
+                logger.info("count:" + i + ", " + MemoryUtil.getMemoryUsageLog());
+            }
+            ResponseData responseData = new ResponseData();
+            responseData.setCharSet("UTF-8");
+            responseData.setContentLength(data.length());
+            responseData.setExecutionTime(1000L);
+            responseData.setHttpStatusCode(200);
+            responseData.setLastModified(new Date());
+            responseData.setMethod("GET");
+            responseData.setMimeType("text/html");
+            responseData.setParentUrl("http://fess.codelibs.org/");
+            responseData.setResponseBody(data.getBytes());
+            responseData.setSessionId(sessionId);
+            responseData.setStatus(0);
+            responseData.setUrl("http://fess.codelibs.org/test.html");
+            /*ResultData resultData =*/fessXpathTransformer.transform(responseData);
+            // System.out.println(resultData.toString());
+        }
+
+        long margin = 5000000L;
+        System.gc();
+        for (int i = 0; i < 300; i++) {
+            if (MemoryUtil.getUsedMemory() < current + margin) {
+                break;
+            }
+            System.gc();
+            Thread.sleep(100L);
+        }
+        final long usedMemory = MemoryUtil.getUsedMemory();
+        assertTrue(usedMemory + " < " + current + " + " + margin + ", " + MemoryUtil.getMemoryUsageLog(), usedMemory < current + margin);
+    }
+
+    private void setValueToObject(Object obj, String name, Object value) {
+        Field field = ClassUtil.getDeclaredField(obj.getClass(), name);
+        field.setAccessible(true);
+        FieldUtil.set(field, obj, value);
+    }
+
+    /**
+     * Registers the helpers needed to run a full {@link FessXpathTransformer#transform(ResponseData)}
+     * call (mirrors the original setup in {@link #test_transform()}), and returns a fresh session id
+     * to use with {@link ResponseData#setSessionId(String)} so {@code getCrawlingConfig(responseData)}
+     * resolves a freshly-stored {@link WebConfig}. Safe to call from multiple test methods.
+     *
+     * <p>The helpers are registered with {@link ComponentUtil}, not with the LastaDi container.
+     * {@link ComponentUtil#getComponent(String)} asks the container first and only falls back to
+     * what {@code ComponentUtil.register} holds, and the container is a JVM-wide singleton that is
+     * never reset between test classes: a component registered there shadows, for the rest of the
+     * JVM, every {@code ComponentUtil.register} another test class makes under the same name -
+     * silently, because the shadowed call neither fails nor logs. Registering {@code systemHelper}
+     * that way left {@code SamlAuthenticatorTest} holding the real clock instead of the fake one it
+     * installs, so its two tests that move the clock failed whenever this class happened to run
+     * before them in the same surefire fork. That test has since moved to the fess-sso-saml plugin,
+     * which changes nothing about the trap: it is a property of the shared container. What {@code ComponentUtil} holds is cleared by
+     * {@code UnitFessTestCase#tearDown}, so nothing outlives a test method and the registration is
+     * simply repeated per method.</p>
+     *
+     * <p>The instances are bare, as they were before: {@code LaContainerImpl.register(Class, name)}
+     * builds a {@code ComponentDefImpl} with no init-method definition, so none of these helpers
+     * ever had its {@code @PostConstruct init()} run here either. {@link SystemHelper#init()} in
+     * particular reads {@code WEB-INF/project.properties}, which a unit test has no copy of, and
+     * would fail if it were called.</p>
+     */
+    private String registerCrawlingHelpers() {
+        ComponentUtil.register(new CrawlingInfoHelper(), "crawlingInfoHelper");
+        ComponentUtil.register(new PathMappingHelper(), "pathMappingHelper");
+        ComponentUtil.register(new CrawlingConfigHelper(), "crawlingConfigHelper");
+        ComponentUtil.register(new SystemHelper(), "systemHelper");
+        ComponentUtil.register(new FileTypeHelper(), "fileTypeHelper");
+        ComponentUtil.register(new DocumentHelper(), "documentHelper");
+        ComponentUtil.register(new LabelTypeHelper(), "labelTypeHelper");
+
+        final WebConfig webConfig = new WebConfig();
+        // A real crawl always stores a WebConfig with a DB-assigned id; give it one here too, since
+        // CrawlingConfig#getConfigId() (used by FessXpathTransformer#pruneNode's cache key) returns
+        // null for an id-less WebConfig, and the field-rule loop's default branch only catches
+        // XPathExpressionException - not the NullPointerException that a null cache key triggers.
+        webConfig.setId("1");
+        final String sessionId = ComponentUtil.getCrawlingConfigHelper().store("test", webConfig);
+        setValueToObject(ComponentUtil.getLabelTypeHelper(), "labelTypePatternList", new ArrayList<LabelTypePattern>());
+        return sessionId;
+    }
+
+    private ResponseData createHtmlResponseData(final String sessionId, final String url, final String html) {
+        final ResponseData responseData = new ResponseData();
+        responseData.setCharSet("UTF-8");
+        responseData.setContentLength(html.length());
+        responseData.setExecutionTime(1000L);
+        responseData.setHttpStatusCode(200);
+        responseData.setLastModified(new Date());
+        responseData.setMethod("GET");
+        responseData.setMimeType("text/html");
+        responseData.setParentUrl("http://fess.codelibs.org/");
+        responseData.setResponseBody(html.getBytes());
+        responseData.setSessionId(sessionId);
+        responseData.setStatus(0);
+        responseData.setUrl(url);
+        return responseData;
+    }
+
+    @Test
+    public void test_transform_linkUnderPrunedHeading_isDiscovered() throws Exception {
+        final String sessionId = registerCrawlingHelpers();
+
+        // The page1 link sits inside a <NAV>, which is itself nested inside an <H1>. The <H1> is
+        // pruned (as "important_content") by the default Fess field-rule wiring (see
+        // crawler/transformer.xml), and <NAV> is one of the default crawler.document.html.pruned.tags
+        // (see fess_config.properties: "noscript,script,style,header,footer,aside,nav,a[rel=nofollow]").
+        // pruneNode/pruneNodeByTags (FessXpathTransformer) only remove descendants that match a
+        // configured pruned-tag pattern - a bare <A> matches none of them, so it is never actually
+        // removed by pruning. Nesting the link under a genuinely-pruned <NAV> is what makes this
+        // fixture exercise the clone-before-prune fix: reverting to pruning the live H1 node removes
+        // the <NAV> (and the page1 link inside it) from the shared document before child-URL
+        // extraction runs.
+        final String html = "<html><head><title>Test</title></head><body>"
+                + "<h1>Heading Text<nav><a href=\"http://example.com/page1.html\">Nav Link</a></nav></h1>" //
+                + "<p><a href=\"http://example.com/page2.html\">Body Link</a></p>" //
+                + "</body></html>";
+
+        final FessXpathTransformer transformer = new FessXpathTransformer();
+        transformer.init();
+        final Map<String, String> rules = new LinkedHashMap<>();
+        rules.put("//A", "href");
+        transformer.setChildUrlRuleMap(rules);
+        // Mirrors the production field rules registered in crawler/transformer.xml.
+        transformer.addFieldRule("title", "//TITLE", true);
+        transformer.addFieldRule("important_content", "//*[self::H1 or self::H2 or self::H3]", true);
+
+        final ResponseData responseData = createHtmlResponseData(sessionId, "http://example.com/", html);
+
+        final ResultData resultData = transformer.transform(responseData);
+
+        // Without the clone-before-prune fix, pruning the LIVE H1 node in storeData's field-rule
+        // loop would remove the nested <NAV> - and the page1 link inside it - from the shared
+        // document before child-URL extraction runs, silently dropping this link. This assertion
+        // fails without that fix.
+        final Set<String> childUrls = resultData.getChildUrlSet().stream().map(RequestData::getUrl).collect(Collectors.toSet());
+        assertEquals(2, childUrls.size(), "child URLs: " + childUrls);
+        assertTrue(childUrls.contains("http://example.com/page1.html"),
+                "child URL nested under a pruned <NAV> inside a pruned H1 was lost: " + childUrls);
+        assertTrue(childUrls.contains("http://example.com/page2.html"), "missing page2: " + childUrls);
+
+        // The pruned field value itself must have the <NAV> content removed, proving pruning
+        // actually occurred on the (cloned) H1 node.
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> dataMap = (Map<String, Object>) resultData.getRawData();
+        final String importantContent = (String) dataMap.get("important_content");
+        assertEquals("Heading Text", importantContent.trim());
+        assertFalse(importantContent.contains("Nav Link"), "important_content should not contain pruned nav text: " + importantContent);
+    }
+
+    @Test
+    public void test_transform_parsesBodyOnce() throws Exception {
+        final String sessionId = registerCrawlingHelpers();
+
+        final String html = "<html><head><title>Test</title></head><body>" //
+                + "<p>Welcome. <a href=\"http://example.com/page1.html\">Link1</a></p>" //
+                + "</body></html>";
+
+        final FessXpathTransformer transformer = new FessXpathTransformer();
+        transformer.init();
+        final Map<String, String> rules = new LinkedHashMap<>();
+        rules.put("//A", "href");
+        transformer.setChildUrlRuleMap(rules);
+        transformer.addFieldRule("title", "//TITLE", true);
+
+        final int[] bodyReadCount = { 0 };
+        final ResponseData responseData = new ResponseData() {
+            @Override
+            public InputStream getResponseBody() {
+                bodyReadCount[0]++;
+                return super.getResponseBody();
+            }
+        };
+        responseData.setCharSet("UTF-8");
+        responseData.setContentLength(html.length());
+        responseData.setExecutionTime(1000L);
+        responseData.setHttpStatusCode(200);
+        responseData.setLastModified(new Date());
+        responseData.setMethod("GET");
+        responseData.setMimeType("text/html");
+        responseData.setParentUrl("http://fess.codelibs.org/");
+        responseData.setResponseBody(html.getBytes());
+        responseData.setSessionId(sessionId);
+        responseData.setStatus(0);
+        responseData.setUrl("http://example.com/");
+
+        transformer.transform(responseData);
+
+        // The response body is read exactly 3 times per transform() call:
+        //   1) HtmlTransformer.updateCharset(...) sniffs the charset (base class, before storeData)
+        //   2) FessXpathTransformer.storeData(...) parses the DOM - this is the Document that gets
+        //      reused for child-URL/anchor extraction
+        //   3) processAdditionalData(...) reads the raw bytes again to populate the "cache" field
+        //      (crawler.document.cache.enabled=true by default for text/html)
+        // Crucially, there is NO 4th read: storeChildUrls(responseData, resultData) reuses the
+        // Document stashed by storeData instead of re-parsing the body via a fresh DOMParser -
+        // that removed 4th read is exactly what this test guards against regressing.
+        assertEquals(3, bodyReadCount[0]);
+    }
+
+    @Test
+    public void test_transform_normalPage_fieldsAndChildUrlsUnaffected() throws Exception {
+        final String sessionId = registerCrawlingHelpers();
+
+        final String html = "<html><head><title>Test Page</title></head><body>" //
+                + "<p>Welcome. <a href=\"http://example.com/page1.html\">Link1</a></p>" //
+                + "<p><a href=\"http://example.com/page2.html\">Link2</a></p>" //
+                + "</body></html>";
+
+        final FessXpathTransformer transformer = new FessXpathTransformer();
+        transformer.init();
+        final Map<String, String> rules = new LinkedHashMap<>();
+        rules.put("//A", "href");
+        transformer.setChildUrlRuleMap(rules);
+        transformer.addFieldRule("title", "//TITLE", true);
+        transformer.addFieldRule("important_content", "//*[self::H1 or self::H2 or self::H3]", true);
+
+        final ResponseData responseData = createHtmlResponseData(sessionId, "http://example.com/", html);
+
+        final ResultData resultData = transformer.transform(responseData);
+
+        final Set<String> childUrls = resultData.getChildUrlSet().stream().map(RequestData::getUrl).collect(Collectors.toSet());
+        assertEquals(2, childUrls.size());
+        assertTrue(childUrls.contains("http://example.com/page1.html"), "missing page1: " + childUrls);
+        assertTrue(childUrls.contains("http://example.com/page2.html"), "missing page2: " + childUrls);
+
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> dataMap = (Map<String, Object>) resultData.getRawData();
+        assertEquals("Test Page", dataMap.get("title"));
+        // No H1/H2/H3 present on this page.
+        assertNull(dataMap.get("important_content"));
+    }
+
+    @Test
+    public void test_pruneNode() throws Exception {
+        final String data = "<html><body><br/><script>foo</script><noscript>bar</noscript></body></html>";
+        final Document document = getDocument(data);
+
+        ComponentUtil.setFessConfig(new FessConfig.SimpleImpl() {
+            private static final long serialVersionUID = 1L;
+
+            @Override
+            public String getCrawlerDocumentHtmlPrunedTags() {
+                return "";
+            }
+        });
+        final FessXpathTransformer transformer = new FessXpathTransformer();
+        transformer.init();
+
+        final Node pruneNode = transformer.pruneNode(document.cloneNode(true), null);
+        assertEquals(getXmlString(document), getXmlString(pruneNode));
+        ComponentUtil.setFessConfig(null);
+    }
+
+    @Test
+    public void test_pruneNode_removeNoScript() throws Exception {
+        final String data = "<html><body><br/><script>foo</script><noscript>bar</noscript></body></html>";
+        final Document document = getDocument(data);
+
+        ComponentUtil.setFessConfig(new FessConfig.SimpleImpl() {
+            private static final long serialVersionUID = 1L;
+
+            @Override
+            public String getCrawlerDocumentHtmlPrunedTags() {
+                return "noscript";
+            }
+        });
+        final FessXpathTransformer transformer = new FessXpathTransformer();
+        transformer.init();
+
+        final Node pruneNode = transformer.pruneNode(document.cloneNode(true), null);
+        final String docString = getXmlString(document);
+        final String pnString = getXmlString(pruneNode);
+        assertTrue(docString.contains("<SCRIPT>"));
+        assertTrue(docString.contains("foo"));
+        assertTrue(docString.contains("<NOSCRIPT>"));
+        assertTrue(docString.contains("bar"));
+        assertTrue(pnString.contains("<SCRIPT>"));
+        assertTrue(pnString.contains("foo"));
+        assertFalse(pnString.contains("<NOSCRIPT>"));
+        assertFalse(pnString.contains("bar"));
+        ComponentUtil.setFessConfig(null);
+    }
+
+    @Test
+    public void test_pruneNode_removeScriptAndNoscript() throws Exception {
+        final String data = "<html><body><br/><script>foo</script><noscript>bar</noscript></body></html>";
+        final Document document = getDocument(data);
+
+        ComponentUtil.setFessConfig(new FessConfig.SimpleImpl() {
+            private static final long serialVersionUID = 1L;
+
+            @Override
+            public String getCrawlerDocumentHtmlPrunedTags() {
+                return "script,noscript";
+            }
+        });
+        final FessXpathTransformer transformer = new FessXpathTransformer();
+        transformer.init();
+
+        final Node pruneNode = transformer.pruneNode(document.cloneNode(true), null);
+        final String docString = getXmlString(document);
+        final String pnString = getXmlString(pruneNode);
+        assertTrue(docString.contains("<SCRIPT>"));
+        assertTrue(docString.contains("foo"));
+        assertTrue(docString.contains("<NOSCRIPT>"));
+        assertTrue(docString.contains("bar"));
+        assertFalse(pnString.contains("<SCRIPT>"));
+        assertFalse(pnString.contains("foo"));
+        assertFalse(pnString.contains("<NOSCRIPT>"));
+        assertFalse(pnString.contains("bar"));
+        ComponentUtil.setFessConfig(null);
+    }
+
+    @Test
+    public void test_pruneNode_removeDivId() throws Exception {
+        final String data = "<html><body><br/><div>foo</div><div id=\"barid\">bar</div></body></html>";
+        final Document document = getDocument(data);
+
+        ComponentUtil.setFessConfig(new FessConfig.SimpleImpl() {
+            private static final long serialVersionUID = 1L;
+
+            @Override
+            public String getCrawlerDocumentHtmlPrunedTags() {
+                return "div#barid";
+            }
+        });
+        final FessXpathTransformer transformer = new FessXpathTransformer();
+        transformer.init();
+
+        final Node pruneNode = transformer.pruneNode(document.cloneNode(true), null);
+        final String docString = getXmlString(document);
+        final String pnString = getXmlString(pruneNode);
+        assertTrue(docString.contains("<DIV>"));
+        assertTrue(docString.contains("foo"));
+        assertTrue(docString.contains("<DIV id=\"barid\">"));
+        assertTrue(docString.contains("bar"));
+        assertTrue(pnString.contains("<DIV>"));
+        assertTrue(pnString.contains("foo"));
+        assertFalse(pnString.contains("<DIV id=\"barid\">"));
+        assertFalse(pnString.contains("bar"));
+        ComponentUtil.setFessConfig(null);
+    }
+
+    @Test
+    public void test_pruneNode_removeDivClass() throws Exception {
+        final String data = "<html><body><br/><div>foo</div><div class=\"barcls\">bar</div></body></html>";
+        final Document document = getDocument(data);
+
+        ComponentUtil.setFessConfig(new FessConfig.SimpleImpl() {
+            private static final long serialVersionUID = 1L;
+
+            @Override
+            public String getCrawlerDocumentHtmlPrunedTags() {
+                return "div.barcls";
+            }
+        });
+        final FessXpathTransformer transformer = new FessXpathTransformer();
+        transformer.init();
+
+        final Node pruneNode = transformer.pruneNode(document.cloneNode(true), null);
+        final String docString = getXmlString(document);
+        final String pnString = getXmlString(pruneNode);
+        assertTrue(docString.contains("<DIV>"));
+        assertTrue(docString.contains("foo"));
+        assertTrue(docString.contains("<DIV class=\"barcls\">"));
+        assertTrue(docString.contains("bar"));
+        assertTrue(pnString.contains("<DIV>"));
+        assertTrue(pnString.contains("foo"));
+        assertFalse(pnString.contains("<DIV class=\"barcls\">"));
+        assertFalse(pnString.contains("bar"));
+        ComponentUtil.setFessConfig(null);
+    }
+
+    @Test
+    public void test_processGoogleOffOn() throws Exception {
+        final String data =
+                "<html><body>foo1<!--googleoff: index-->foo2<a href=\"index.html\">foo3</a>foo4<!--googleon: index-->foo5</body></html>";
+        final Document document = getDocument(data);
+
+        final FessXpathTransformer transformer = new FessXpathTransformer();
+
+        final Node pruneNode = transformer.processGoogleOffOn(document, new ValueHolder<>(true));
+        final String output = getXmlString(pruneNode).replaceAll(".*<BODY[^>]*>", "").replaceAll("</BODY>.*", "");
+        assertEquals("foo1<!--googleoff: index--><A href=\"index.html\"/><!--googleon: index-->foo5", output);
+    }
+
+    @Test
+    public void test_processXRobotsTags_no() throws Exception {
+        final FessXpathTransformer transformer = new FessXpathTransformer() {
+            @Override
+            protected Map<String, String> getConfigPrameterMap(final ResponseData responseData, final ConfigName config) {
+                return Collections.emptyMap();
+            }
+        };
+        transformer.fessConfig = new FessConfig.SimpleImpl() {
+            private static final long serialVersionUID = 1L;
+
+            @Override
+            public boolean isCrawlerIgnoreRobotsTags() {
+                return false;
+            };
+        };
+
+        final ResponseData responseData = new ResponseData();
+        responseData.setUrl("http://example.com/");
+
+        transformer.processXRobotsTag(responseData, new ResultData());
+        assertFalse(responseData.isNoFollow());
+    }
+
+    @Test
+    public void test_processXRobotsTag_noindexnofollow() throws Exception {
+        final FessXpathTransformer transformer = new FessXpathTransformer() {
+            protected Map<String, String> getConfigPrameterMap(final ResponseData responseData, final ConfigName config) {
+                return Collections.emptyMap();
+            }
+        };
+        transformer.fessConfig = new FessConfig.SimpleImpl() {
+            private static final long serialVersionUID = 1L;
+
+            @Override
+            public boolean isCrawlerIgnoreRobotsTags() {
+                return false;
+            };
+        };
+
+        final ResponseData responseData = new ResponseData();
+        responseData.setUrl("http://example.com/");
+        responseData.addMetaData("X-Robots-Tag", "noindex,nofollow");
+
+        try {
+            transformer.processXRobotsTag(responseData, new ResultData());
+            fail();
+        } catch (ChildUrlsException e) {
+            assertTrue(e.getChildUrlList().isEmpty());
+        } catch (Exception e) {
+            fail();
+        }
+    }
+
+    @Test
+    public void test_processXRobotsTag_noindex() throws Exception {
+        final String data = "<meta name=\"robots\" content=\"noindex\" /><a href=\"index.html\">aaa</a>";
+
+        final FessXpathTransformer transformer = new FessXpathTransformer() {
+            protected Map<String, String> getConfigPrameterMap(final ResponseData responseData, final ConfigName config) {
+                return Collections.emptyMap();
+            }
+        };
+        transformer.fessConfig = new FessConfig.SimpleImpl() {
+            private static final long serialVersionUID = 1L;
+
+            @Override
+            public boolean isCrawlerIgnoreRobotsTags() {
+                return false;
+            };
+        };
+
+        final ResponseData responseData = new ResponseData();
+        responseData.setUrl("http://example.com/");
+        responseData.setResponseBody(data.getBytes());
+        responseData.addMetaData("X-Robots-Tag", "noindex");
+
+        try {
+            transformer.processXRobotsTag(responseData, new ResultData());
+            fail();
+        } catch (ChildUrlsException e) {
+            assertTrue(e.getChildUrlList().isEmpty());
+        } catch (Exception e) {
+            fail();
+        }
+    }
+
+    @Test
+    public void test_processXRobotsTag_nofollow() throws Exception {
+        final FessXpathTransformer transformer = new FessXpathTransformer() {
+            protected Map<String, String> getConfigPrameterMap(final ResponseData responseData, final ConfigName config) {
+                return Collections.emptyMap();
+            }
+        };
+        transformer.fessConfig = new FessConfig.SimpleImpl() {
+            private static final long serialVersionUID = 1L;
+
+            @Override
+            public boolean isCrawlerIgnoreRobotsTags() {
+                return false;
+            };
+        };
+
+        final ResponseData responseData = new ResponseData();
+        responseData.addMetaData("X-Robots-Tag", "nofollow");
+
+        transformer.processXRobotsTag(responseData, new ResultData());
+        assertTrue(responseData.isNoFollow());
+    }
+
+    @Test
+    public void test_processMetaRobots_no() throws Exception {
+        final String data = "<html><body>foo</body></html>";
+        final Document document = getDocument(data);
+
+        final FessXpathTransformer transformer = new FessXpathTransformer() {
+            @Override
+            protected Map<String, String> getConfigPrameterMap(final ResponseData responseData, final ConfigName config) {
+                return Collections.emptyMap();
+            }
+        };
+        transformer.fessConfig = new FessConfig.SimpleImpl() {
+            private static final long serialVersionUID = 1L;
+
+            @Override
+            public boolean isCrawlerIgnoreRobotsTags() {
+                return false;
+            };
+        };
+
+        final ResponseData responseData = new ResponseData();
+        responseData.setUrl("http://example.com/");
+
+        transformer.processMetaRobots(responseData, new ResultData(), document);
+        assertFalse(responseData.isNoFollow());
+    }
+
+    @Test
+    public void test_processMetaRobots_none() throws Exception {
+        final String data = "<meta name=\"robots\" content=\"none\" />";
+        final Document document = getDocument(data);
+
+        final FessXpathTransformer transformer = new FessXpathTransformer() {
+            protected Map<String, String> getConfigPrameterMap(final ResponseData responseData, final ConfigName config) {
+                return Collections.emptyMap();
+            }
+        };
+        transformer.fessConfig = new FessConfig.SimpleImpl() {
+            private static final long serialVersionUID = 1L;
+
+            @Override
+            public boolean isCrawlerIgnoreRobotsTags() {
+                return false;
+            };
+        };
+
+        final ResponseData responseData = new ResponseData();
+        responseData.setUrl("http://example.com/");
+
+        try {
+            transformer.processMetaRobots(responseData, new ResultData(), document);
+            fail();
+        } catch (ChildUrlsException e) {
+            assertTrue(e.getChildUrlList().isEmpty());
+        } catch (Exception e) {
+            fail();
+        }
+    }
+
+    @Test
+    public void test_processMetaRobots_noindexnofollow() throws Exception {
+        final String data = "<meta name=\"ROBOTS\" content=\"NOINDEX,NOFOLLOW\" />";
+        final Document document = getDocument(data);
+
+        final FessXpathTransformer transformer = new FessXpathTransformer() {
+            protected Map<String, String> getConfigPrameterMap(final ResponseData responseData, final ConfigName config) {
+                return Collections.emptyMap();
+            }
+        };
+        transformer.fessConfig = new FessConfig.SimpleImpl() {
+            private static final long serialVersionUID = 1L;
+
+            @Override
+            public boolean isCrawlerIgnoreRobotsTags() {
+                return false;
+            };
+        };
+
+        final ResponseData responseData = new ResponseData();
+        responseData.setUrl("http://example.com/");
+
+        try {
+            transformer.processMetaRobots(responseData, new ResultData(), document);
+            fail();
+        } catch (ChildUrlsException e) {
+            assertTrue(e.getChildUrlList().isEmpty());
+        } catch (Exception e) {
+            fail();
+        }
+    }
+
+    @Test
+    public void test_processMetaRobots_noindex() throws Exception {
+        final String data = "<meta name=\"robots\" content=\"noindex\" /><a href=\"index.html\">aaa</a>";
+        final Document document = getDocument(data);
+
+        final FessXpathTransformer transformer = new FessXpathTransformer() {
+            protected Map<String, String> getConfigPrameterMap(final ResponseData responseData, final ConfigName config) {
+                return Collections.emptyMap();
+            }
+
+            protected PathMappingHelper getPathMappingHelper() {
+                return new PathMappingHelper();
+            }
+        };
+        transformer.fessConfig = new FessConfig.SimpleImpl() {
+            private static final long serialVersionUID = 1L;
+
+            @Override
+            public boolean isCrawlerIgnoreRobotsTags() {
+                return false;
+            };
+        };
+
+        final ResponseData responseData = new ResponseData();
+        responseData.setUrl("http://example.com/");
+        responseData.setResponseBody(data.getBytes());
+
+        try {
+            transformer.processMetaRobots(responseData, new ResultData(), document);
+            fail();
+        } catch (ChildUrlsException e) {
+            assertTrue(e.getChildUrlList().isEmpty());
+        } catch (Exception e) {
+            fail();
+        }
+    }
+
+    @Test
+    public void test_processMetaRobots_nofollow() throws Exception {
+        final String data = "<meta name=\"robots\" content=\"nofollow\" />";
+        final Document document = getDocument(data);
+
+        final FessXpathTransformer transformer = new FessXpathTransformer() {
+            protected Map<String, String> getConfigPrameterMap(final ResponseData responseData, final ConfigName config) {
+                return Collections.emptyMap();
+            }
+        };
+        transformer.fessConfig = new FessConfig.SimpleImpl() {
+            private static final long serialVersionUID = 1L;
+
+            @Override
+            public boolean isCrawlerIgnoreRobotsTags() {
+                return false;
+            };
+        };
+
+        final ResponseData responseData = new ResponseData();
+        responseData.setUrl("http://example.com/");
+
+        transformer.processMetaRobots(responseData, new ResultData(), document);
+        assertTrue(responseData.isNoFollow());
+    }
+
+    private Document getDocument(final String data) throws Exception {
+        final DOMParser parser = new DOMParser();
+        final ByteArrayInputStream is = new ByteArrayInputStream(data.getBytes("UTF-8"));
+        parser.parse(new InputSource(is));
+        return parser.getDocument();
+    }
+
+    private String getXmlString(final Node node) throws Exception {
+        final TransformerFactory tf = TransformerFactory.newInstance();
+        final javax.xml.transform.Transformer transformer = tf.newTransformer();
+        transformer.setOutputProperty(OutputKeys.ENCODING, "UTF-8");
+        transformer.setOutputProperty(OutputKeys.INDENT, "no");
+        transformer.setOutputProperty(OutputKeys.METHOD, "xml");
+
+        final StringWriter writer = new StringWriter();
+        final StreamResult result = new StreamResult(writer);
+
+        final DOMSource source = new DOMSource(node);
+        transformer.transform(source, result);
+
+        return writer.toString();
+    }
+
+    @Test
+    public void test_getChildUrlRules() {
+        assertEquals("", new FessXpathTransformer() {
+            protected Map<String, String> getConfigPrameterMap(final ResponseData responseData, final ConfigName config) {
+                return Map.of();
+            }
+        }.getChildUrlRules(null, null).map(v -> v.getFirst() + ":" + v.getSecond()).collect(Collectors.joining(",")));
+        assertEquals("//A:href", new FessXpathTransformer() {
+            protected Map<String, String> getConfigPrameterMap(final ResponseData responseData, final ConfigName config) {
+                return Map.of(Config.HTML_CHILD_URL_RULES, "//A:href");
+            }
+        }.getChildUrlRules(null, null).map(v -> v.getFirst() + ":" + v.getSecond()).collect(Collectors.joining(",")));
+        assertEquals("//A:href,//AREA:href", new FessXpathTransformer() {
+            protected Map<String, String> getConfigPrameterMap(final ResponseData responseData, final ConfigName config) {
+                return Map.of(Config.HTML_CHILD_URL_RULES, "//A:href,//AREA:href");
+            }
+        }.getChildUrlRules(null, null).map(v -> v.getFirst() + ":" + v.getSecond()).collect(Collectors.joining(",")));
+        assertEquals("//A:href,//AREA:href", new FessXpathTransformer() {
+            protected Map<String, String> getConfigPrameterMap(final ResponseData responseData, final ConfigName config) {
+                return Map.of(Config.HTML_CHILD_URL_RULES, " //A : href , //AREA : href ");
+            }
+        }.getChildUrlRules(null, null).map(v -> v.getFirst() + ":" + v.getSecond()).collect(Collectors.joining(",")));
+    }
+
+    @Test
+    public void test_convertChildUrlList() {
+        final FessXpathTransformer fessXpathTransformer = new FessXpathTransformer() {
+            protected PathMappingHelper getPathMappingHelper() {
+                return new PathMappingHelper();
+            }
+        };
+        fessXpathTransformer.init();
+        fessXpathTransformer.convertUrlMap.put("feed:", "http:");
+
+        List<RequestData> urlList = new ArrayList<>();
+
+        urlList = fessXpathTransformer.convertChildUrlList(urlList);
+        assertEquals(0, urlList.size());
+
+        urlList.clear();
+        urlList.add(RequestDataBuilder.newRequestData().get().url("http://www.example.com").build());
+        urlList = fessXpathTransformer.convertChildUrlList(urlList);
+        assertEquals(1, urlList.size());
+        assertEquals("http://www.example.com", urlList.get(0).getUrl());
+
+        urlList.clear();
+        urlList.add(RequestDataBuilder.newRequestData().get().url("http://www.example.com").build());
+        urlList.add(RequestDataBuilder.newRequestData().get().url("http://www.test.com").build());
+        urlList = fessXpathTransformer.convertChildUrlList(urlList);
+        assertEquals(2, urlList.size());
+        assertEquals("http://www.example.com", urlList.get(0).getUrl());
+        assertEquals("http://www.test.com", urlList.get(1).getUrl());
+
+        urlList.clear();
+        urlList.add(RequestDataBuilder.newRequestData().get().url("feed://www.example.com").build());
+        urlList.add(RequestDataBuilder.newRequestData().get().url("http://www.test.com").build());
+        urlList = fessXpathTransformer.convertChildUrlList(urlList);
+        assertEquals(2, urlList.size());
+        assertEquals("http://www.example.com", urlList.get(0).getUrl());
+        assertEquals("http://www.test.com", urlList.get(1).getUrl());
+
+    }
+
+    @Test
+    public void test_removeCommentTag() {
+        final FessXpathTransformer fessXpathTransformer = new FessXpathTransformer();
+        fessXpathTransformer.init();
+        fessXpathTransformer.convertUrlMap.put("feed:", "http:");
+
+        assertEquals("", fessXpathTransformer.removeCommentTag(""));
+        assertEquals(" ", fessXpathTransformer.removeCommentTag("<!-- - -->"));
+        assertEquals("abc", fessXpathTransformer.removeCommentTag("abc"));
+        assertEquals("abc ", fessXpathTransformer.removeCommentTag("abc<!-- foo -->"));
+        assertEquals("abc 123", fessXpathTransformer.removeCommentTag("abc<!-- fo\no -->123"));
+        assertEquals("abc 123", fessXpathTransformer.removeCommentTag("abc<!--\n foo -->123"));
+        assertEquals("abc 123", fessXpathTransformer.removeCommentTag("abc<!-- foo -->123"));
+        assertEquals("abc 123 ", fessXpathTransformer.removeCommentTag("abc<!-- foo1 -->123<!-- foo2 -->"));
+        assertEquals("abc 123 xyz", fessXpathTransformer.removeCommentTag("abc<!-- foo1 -->123<!-- foo2 -->xyz"));
+        assertEquals("abc ", fessXpathTransformer.removeCommentTag("abc<!---->"));
+        assertEquals("abc -->", fessXpathTransformer.removeCommentTag("abc<!-- foo-->-->"));
+        assertEquals("abc<!-- foo", fessXpathTransformer.removeCommentTag("abc<!-- foo"));
+        assertEquals("abc  -->123", fessXpathTransformer.removeCommentTag("abc<!-- <!-- foo --> -->123"));
+    }
+
+    @Test
+    public void test_canonicalXpath() throws Exception {
+        final FessXpathTransformer transformer = new FessXpathTransformer() {
+            protected Map<String, String> getConfigPrameterMap(final ResponseData responseData, final ConfigName config) {
+                return Collections.emptyMap();
+            }
+        };
+        transformer.init();
+
+        final Map<String, Object> dataMap = new HashMap<String, Object>();
+        final ResponseData responseData = new ResponseData();
+        responseData.setUrl("http://example.com/");
+
+        // Absent or self-referential canonical URLs must never trigger a ChildUrlsException
+        // redirect. processAdditionalData() continues past the canonical check into code that
+        // needs other DI components not set up in this narrow unit test; whether that surfaces
+        // as ComponentNotFoundException or (if a sibling test has since registered those
+        // components into the shared, JVM-wide container) another exception like
+        // NullPointerException is incidental environment noise, not the behavior under test.
+        String data = "<html><body>aaa</body></html>";
+        Document document = getDocument(data);
+        try {
+            transformer.processAdditionalData(dataMap, responseData, document);
+            fail();
+        } catch (final ChildUrlsException e) {
+            fail("Unexpected canonical redirect: " + e.getChildUrlList());
+        } catch (final Exception e) {
+            // ignore
+        }
+
+        data = "<html><head><link rel=\"canonical\" href=\"http://example.com/\"></head><body>aaa</body></html>";
+        document = getDocument(data);
+        try {
+            transformer.processAdditionalData(dataMap, responseData, document);
+            fail();
+        } catch (final ChildUrlsException e) {
+            fail("Unexpected canonical redirect: " + e.getChildUrlList());
+        } catch (final Exception e) {
+            // ignore
+        }
+
+        data = "<html><head><link rel=\"canonical\" href=\"http://example.com/foo\"></head><body>aaa</body></html>";
+        document = getDocument(data);
+        try {
+            transformer.processAdditionalData(dataMap, responseData, document);
+            fail();
+        } catch (final ChildUrlsException e) {
+            final Set<RequestData> childUrlList = e.getChildUrlList();
+            assertEquals(1, childUrlList.size());
+            assertEquals("http://example.com/foo", childUrlList.iterator().next().getUrl());
+        }
+
+        data = "<html><link rel=\"canonical\" href=\"http://example.com/foo\"><body>aaa</body></html>";
+        document = getDocument(data);
+        try {
+            transformer.processAdditionalData(dataMap, responseData, document);
+            fail();
+        } catch (final ChildUrlsException e) {
+            final Set<RequestData> childUrlList = e.getChildUrlList();
+            assertEquals(1, childUrlList.size());
+            assertEquals("http://example.com/foo", childUrlList.iterator().next().getUrl());
+        }
+    }
+
+    @Test
+    public void test_getSingleNodeValue() throws Exception {
+        final FessXpathTransformer transformer = new FessXpathTransformer();
+
+        String data = "<html><body>aaa<style>bbb</style>ccc</body></html>";
+        Document document = getDocument(data);
+        String value = transformer.getSingleNodeValue(document, "//BODY", node -> node);
+        assertEquals("aaa bbb ccc", value);
+
+        data = "<html><body> aaa <p> bbb <b>ccc</b> </p> </body></html>";
+        document = getDocument(data);
+        value = transformer.getSingleNodeValue(document, "//BODY", node -> node);
+        assertEquals("aaa bbb ccc", value);
+
+        data = "<html><body> aaa <p> bbb <aaa>ccc</bbb> </p> </body></html>";
+        document = getDocument(data);
+        value = transformer.getSingleNodeValue(document, "//BODY", node -> node);
+        assertEquals("aaa bbb ccc", value);
+
+        data = "<html><body> aaa <p> bbb <!-- test -->ccc<!-- test --> </p> </body></html>";
+        document = getDocument(data);
+        value = transformer.getSingleNodeValue(document, "//BODY", node -> node);
+        assertEquals("aaa bbb ccc", value);
+    }
+
+    @Test
+    public void test_contentXpath() throws Exception {
+        final FessXpathTransformer transformer = new FessXpathTransformer();
+
+        final String data = "<html><head><meta name=\"keywords\" content=\"bbb\"></head><body>aaa</body></html>";
+        final Document document = getDocument(data);
+        String value = transformer.getSingleNodeValue(document, "//BODY", node -> node);
+        assertEquals("aaa", value);
+
+        value = transformer.getSingleNodeValue(document, "//META[@name='keywords']/@content", node -> node);
+        assertEquals("bbb", value);
+
+        value = transformer.getSingleNodeValue(document, "//META[@name='keywords']/@content|//BODY", node -> node);
+        assertEquals("bbb aaa", value);
+    }
+
+    @Test
+    public void test_getCanonicalUrl() throws Exception {
+        final FessXpathTransformer transformer = new FessXpathTransformer() {
+            @Override
+            protected Map<String, String> getConfigPrameterMap(final ResponseData responseData, final ConfigName config) {
+                return Collections.emptyMap();
+            }
+        };
+        transformer.fessConfig = new FessConfig.SimpleImpl() {
+            private static final long serialVersionUID = 1L;
+
+            public String getCrawlerDocumentHtmlCanonicalXpath() {
+                return "//LINK[@rel='canonical'][1]/@href";
+            };
+        };
+
+        final ResponseData responseData = new ResponseData();
+        responseData.setSessionId("test");
+        responseData.setUrl("http://example.com/");
+
+        String data = "<html><head></head><body>aaa</body></html>";
+        Document document = getDocument(data);
+        String value = transformer.getCanonicalUrl(responseData, document);
+        assertNull(value);
+
+        data = "<html><head><link rel=\"canonical\" href=\"http://example.com/\"></head><body>aaa</body></html>";
+        document = getDocument(data);
+        value = transformer.getCanonicalUrl(responseData, document);
+        assertEquals("http://example.com/", value);
+
+        data = "<html><head><link rel=\"canonical\" href=\"http://example1.com/\"><link rel=\"canonical\" href=\"http://example2.com/\"></head><body>aaa</body></html>";
+        document = getDocument(data);
+        value = transformer.getCanonicalUrl(responseData, document);
+        assertEquals("http://example1.com/", value);
+    }
+
+    @Test
+    public void test_normalizeCanonicalUrl() throws Exception {
+        final FessXpathTransformer transformer = new FessXpathTransformer();
+        String value;
+
+        value = transformer.normalizeCanonicalUrl("http://hoge.com/", "a");
+        assertEquals("http://hoge.com/a", value);
+
+        value = transformer.normalizeCanonicalUrl("http://hoge.com/", "aaa");
+        assertEquals("http://hoge.com/aaa", value);
+
+        value = transformer.normalizeCanonicalUrl("http://hoge.com/", "/aaa");
+        assertEquals("http://hoge.com/aaa", value);
+
+        value = transformer.normalizeCanonicalUrl("http://hoge.com/bbb", "aaa");
+        assertEquals("http://hoge.com/aaa", value);
+
+        value = transformer.normalizeCanonicalUrl("http://hoge.com/bbb/", "aaa");
+        assertEquals("http://hoge.com/bbb/aaa", value);
+
+        value = transformer.normalizeCanonicalUrl("http://hoge.com/bbb/", "/aaa");
+        assertEquals("http://hoge.com/aaa", value);
+
+        value = transformer.normalizeCanonicalUrl("http://hoge.com/bbb", "/aaa");
+        assertEquals("http://hoge.com/aaa", value);
+
+        value = transformer.normalizeCanonicalUrl("http://hoge.com/bbb", "http://hoge.com/aaa");
+        assertEquals("http://hoge.com/aaa", value);
+
+        value = transformer.normalizeCanonicalUrl("http://hoge.com/bbb", "://hoge.com/aaa");
+        assertEquals("http://hoge.com/aaa", value);
+
+        value = transformer.normalizeCanonicalUrl("http://hoge.com/bbb", "//hoge.com/aaa");
+        assertEquals("http://hoge.com/aaa", value);
+    }
+
+    @Test
+    public void test_getBaseUrl() throws Exception {
+        final FessXpathTransformer transformer = new FessXpathTransformer();
+        URL value;
+
+        value = transformer.getBaseUrl("http://hoge.com/", null);
+        assertEquals("http://hoge.com/", value.toExternalForm());
+
+        value = transformer.getBaseUrl("http://hoge.com/", "http://hoge.com/");
+        assertEquals("http://hoge.com/", value.toExternalForm());
+
+        value = transformer.getBaseUrl("http://hoge.com/aaa/bbb.html", "http://hoge.com/");
+        assertEquals("http://hoge.com/", value.toExternalForm());
+
+        value = transformer.getBaseUrl("http://hoge.com/aaa/bbb.html", "http://hoge.com/ccc/");
+        assertEquals("http://hoge.com/ccc/", value.toExternalForm());
+
+        value = transformer.getBaseUrl("http://hoge.com/aaa/bbb.html", null);
+        assertEquals("http://hoge.com/aaa/bbb.html", value.toExternalForm());
+
+        value = transformer.getBaseUrl("http://hoge.com/", "://hoge.com/aaa/");
+        assertEquals("http://hoge.com/aaa/", value.toExternalForm());
+
+        value = transformer.getBaseUrl("https://hoge.com/", "://hoge.com/aaa/");
+        assertEquals("https://hoge.com/aaa/", value.toExternalForm());
+
+        value = transformer.getBaseUrl("http://hoge.com/", "//hoge.com/aaa/");
+        assertEquals("http://hoge.com/aaa/", value.toExternalForm());
+
+        value = transformer.getBaseUrl("https://hoge.com/", "//hoge.com/aaa/");
+        assertEquals("https://hoge.com/aaa/", value.toExternalForm());
+
+        value = transformer.getBaseUrl("https://hoge.com/", "aaa/");
+        assertEquals("https://hoge.com/aaa/", value.toExternalForm());
+    }
+
+    @Test
+    public void test_getThumbnailUrl_no() throws Exception {
+
+        final FessXpathTransformer transformer = new FessXpathTransformer();
+        transformer.init();
+        final ResponseData responseData = new ResponseData();
+        responseData.setUrl("http://example.com/");
+
+        String data = "<html><body>foo</body></html>";
+        assertNull(transformer.getThumbnailUrl(responseData, getDocument(data)));
+
+        data = "<img src=\"http://example/foo.jpg\" width=\"x\" height=\"x\">";
+        assertNull(transformer.getThumbnailUrl(responseData, getDocument(data)));
+
+        data = "<img src=\"http://example/foo.jpg\" width=\"10\" height=\"100\">";
+        assertNull(transformer.getThumbnailUrl(responseData, getDocument(data)));
+
+        data = "<img src=\"http://example/foo.jpg\" width=\"100\" height=\"10\">";
+        assertNull(transformer.getThumbnailUrl(responseData, getDocument(data)));
+
+        data = "<img src=\"http://example/foo.jpg\" width=\"400\" height=\"100\">";
+        assertNull(transformer.getThumbnailUrl(responseData, getDocument(data)));
+
+        data = "<img src=\"http://example/foo.jpg\" width=\"100\" height=\"400\">";
+        assertNull(transformer.getThumbnailUrl(responseData, getDocument(data)));
+    }
+
+    @Test
+    public void test_getThumbnailUrl() throws Exception {
+        String data = "<meta property=\"og:image\" content=\"http://example/foo.jpg\" />";
+        String expected = "http://example/foo.jpg";
+        assertGetThumbnailUrl(data, expected);
+
+        data = "<meta property=\"og:image\" content=\"://example/foo.jpg\" />";
+        expected = "http://example/foo.jpg";
+        assertGetThumbnailUrl(data, expected);
+
+        data = "<meta property=\"og:image\" content=\"http://example/foo.jpg\" />";
+        expected = "http://example/foo.jpg";
+        assertGetThumbnailUrl(data, expected);
+
+        data = "<meta property=\"og:image\" content=\"/foo.jpg\" />";
+        expected = "http://example.com/foo.jpg";
+        assertGetThumbnailUrl(data, expected);
+
+        data = "<img src=\"http://example/foo.jpg\">";
+        expected = "http://example/foo.jpg";
+        assertGetThumbnailUrl(data, expected);
+
+        data = "<img src=\"http://example/foo.jpg\">" //
+                + "<img src=\"http://example/bar.jpg\">";
+        expected = "http://example/foo.jpg";
+        assertGetThumbnailUrl(data, expected);
+
+        data = "<img src=\"http://example/foo.jpg\">" //
+                + "<img src=\"http://example/bar.jpg\" width=\"100\" height=\"100\">";
+        expected = "http://example/bar.jpg";
+        assertGetThumbnailUrl(data, expected);
+
+        data = "<img src=\"http://example/foo.jpg\" width=\"100\" height=\"100\">";
+        expected = "http://example/foo.jpg";
+        assertGetThumbnailUrl(data, expected);
+
+        data = "<img src=\"http://example/foo.jpg\" width=\"100%\" height=\"100%\">";
+        expected = "http://example/foo.jpg";
+        assertGetThumbnailUrl(data, expected);
+
+        data = "<img src=\"http://example/foo.jpg\" width=\"100px\" height=\"100px\">";
+        expected = "http://example/foo.jpg";
+        assertGetThumbnailUrl(data, expected);
+    }
+
+    private void assertGetThumbnailUrl(String data, String expected) throws Exception {
+        final Document document = getDocument(data);
+
+        final FessXpathTransformer transformer = new FessXpathTransformer();
+        transformer.init();
+
+        final ResponseData responseData = new ResponseData();
+        responseData.setUrl("http://example.com/");
+
+        assertEquals(expected, transformer.getThumbnailUrl(responseData, document));
+    }
+
+    @Test
+    public void test_isValidUrl() {
+        final FessXpathTransformer transformer = new FessXpathTransformer();
+
+        assertTrue(transformer.isValidUrl("http://www.example.com"));
+        assertTrue(transformer.isValidUrl("http://www.example.com/aaa"));
+        assertTrue(transformer.isValidUrl("https://www.example.com"));
+        assertTrue(transformer.isValidUrl("://www.example.com"));
+        assertTrue(transformer.isValidUrl("//www.example.com"));
+
+        assertFalse(transformer.isValidUrl(null));
+        assertFalse(transformer.isValidUrl(" "));
+        assertFalse(transformer.isValidUrl("http://"));
+        assertFalse(transformer.isValidUrl("http://http://www.example.com"));
+    }
+
+    @Test
+    public void test_processFieldConfigs() {
+        final FessXpathTransformer transformer = new FessXpathTransformer();
+        final Map<String, String> params = Maps.of("foo", "cache", "bar", "overwrite", "baz", "cache|overwrite");
+        FieldConfigs fieldConfigs = new FieldConfigs(params);
+        final Map<String, Object> dataMap = Map.of(//
+                "foo", new String[] { "aaa", "bbb" }, //
+                "bar", new String[] { "ccc", "ddd" }, //
+                "baz", new String[] { "eee", "fff" });
+        final Map<String, Object> resultMap = transformer.processFieldConfigs(dataMap, fieldConfigs);
+        assertEquals("aaa", ((String[]) resultMap.get("foo"))[0]);
+        assertEquals("bbb", ((String[]) resultMap.get("foo"))[1]);
+        assertEquals("ddd", resultMap.get("bar"));
+        assertEquals("fff", resultMap.get("baz"));
+    }
+
+    @Test
+    public void test_getAnchorList_noDuplicates() throws Exception {
+        final String data = "<html><body>" + "<a href=\"http://example.com/page1\">link1</a>"
+                + "<a href=\"http://example.com/page2\">link2</a>" + "<a href=\"http://example.com/page3\">link3</a>" + "</body></html>";
+        final Document document = getDocument(data);
+
+        final FessXpathTransformer transformer = createAnchorListTransformer();
+        final Map<String, String> rules = new LinkedHashMap<>();
+        rules.put("//A", "href");
+        transformer.setChildUrlRuleMap(rules);
+
+        final ResponseData responseData = new ResponseData();
+        responseData.setUrl("http://example.com/");
+        responseData.setCharSet("UTF-8");
+
+        final List<String> result = transformer.getAnchorList(document, responseData);
+        assertEquals(3, result.size());
+        assertEquals("http://example.com/page1", result.get(0));
+        assertEquals("http://example.com/page2", result.get(1));
+        assertEquals("http://example.com/page3", result.get(2));
+    }
+
+    @Test
+    public void test_getAnchorList_duplicatesFromSameTagType() throws Exception {
+        final String data =
+                "<html><body>" + "<a href=\"http://example.com/page1\">link1</a>" + "<a href=\"http://example.com/page2\">link2</a>"
+                        + "<a href=\"http://example.com/page1\">link1 again</a>" + "<a href=\"http://example.com/page3\">link3</a>"
+                        + "<a href=\"http://example.com/page2\">link2 again</a>" + "</body></html>";
+        final Document document = getDocument(data);
+
+        final FessXpathTransformer transformer = createAnchorListTransformer();
+        final Map<String, String> rules = new LinkedHashMap<>();
+        rules.put("//A", "href");
+        transformer.setChildUrlRuleMap(rules);
+
+        final ResponseData responseData = new ResponseData();
+        responseData.setUrl("http://example.com/");
+        responseData.setCharSet("UTF-8");
+
+        final List<String> result = transformer.getAnchorList(document, responseData);
+        assertEquals(3, result.size());
+        assertEquals("http://example.com/page1", result.get(0));
+        assertEquals("http://example.com/page2", result.get(1));
+        assertEquals("http://example.com/page3", result.get(2));
+    }
+
+    @Test
+    public void test_getAnchorList_duplicatesFromDifferentTags() throws Exception {
+        final String data = "<html><body>" + "<a href=\"http://example.com/page1\">link1</a>" + "<img src=\"http://example.com/page1\">"
+                + "<a href=\"http://example.com/page2\">link2</a>" + "<img src=\"http://example.com/image1.jpg\">"
+                + "<img src=\"http://example.com/page2\">" + "</body></html>";
+        final Document document = getDocument(data);
+
+        final FessXpathTransformer transformer = createAnchorListTransformer();
+        final Map<String, String> rules = new LinkedHashMap<>();
+        rules.put("//A", "href");
+        rules.put("//IMG", "src");
+        transformer.setChildUrlRuleMap(rules);
+
+        final ResponseData responseData = new ResponseData();
+        responseData.setUrl("http://example.com/");
+        responseData.setCharSet("UTF-8");
+
+        final List<String> result = transformer.getAnchorList(document, responseData);
+        assertEquals(3, result.size());
+        assertEquals("http://example.com/page1", result.get(0));
+        assertEquals("http://example.com/page2", result.get(1));
+        assertEquals("http://example.com/image1.jpg", result.get(2));
+    }
+
+    @Test
+    public void test_getAnchorList_preservesOrder() throws Exception {
+        final String data = "<html><body>" + "<a href=\"http://example.com/ccc\">link3</a>" + "<a href=\"http://example.com/aaa\">link1</a>"
+                + "<a href=\"http://example.com/bbb\">link2</a>" + "<a href=\"http://example.com/aaa\">link1 dup</a>"
+                + "<a href=\"http://example.com/ccc\">link3 dup</a>" + "</body></html>";
+        final Document document = getDocument(data);
+
+        final FessXpathTransformer transformer = createAnchorListTransformer();
+        final Map<String, String> rules = new LinkedHashMap<>();
+        rules.put("//A", "href");
+        transformer.setChildUrlRuleMap(rules);
+
+        final ResponseData responseData = new ResponseData();
+        responseData.setUrl("http://example.com/");
+        responseData.setCharSet("UTF-8");
+
+        final List<String> result = transformer.getAnchorList(document, responseData);
+        assertEquals(3, result.size());
+        assertEquals("http://example.com/ccc", result.get(0));
+        assertEquals("http://example.com/aaa", result.get(1));
+        assertEquals("http://example.com/bbb", result.get(2));
+    }
+
+    @Test
+    public void test_getAnchorList_emptyDocument() throws Exception {
+        final String data = "<html><body><p>no links here</p></body></html>";
+        final Document document = getDocument(data);
+
+        final FessXpathTransformer transformer = createAnchorListTransformer();
+        final Map<String, String> rules = new LinkedHashMap<>();
+        rules.put("//A", "href");
+        transformer.setChildUrlRuleMap(rules);
+
+        final ResponseData responseData = new ResponseData();
+        responseData.setUrl("http://example.com/");
+        responseData.setCharSet("UTF-8");
+
+        final List<String> result = transformer.getAnchorList(document, responseData);
+        assertEquals(0, result.size());
+    }
+
+    @Test
+    public void test_getAnchorList_allDuplicates() throws Exception {
+        final String data = "<html><body>" + "<a href=\"http://example.com/same\">link1</a>"
+                + "<a href=\"http://example.com/same\">link2</a>" + "<a href=\"http://example.com/same\">link3</a>" + "</body></html>";
+        final Document document = getDocument(data);
+
+        final FessXpathTransformer transformer = createAnchorListTransformer();
+        final Map<String, String> rules = new LinkedHashMap<>();
+        rules.put("//A", "href");
+        transformer.setChildUrlRuleMap(rules);
+
+        final ResponseData responseData = new ResponseData();
+        responseData.setUrl("http://example.com/");
+        responseData.setCharSet("UTF-8");
+
+        final List<String> result = transformer.getAnchorList(document, responseData);
+        assertEquals(1, result.size());
+        assertEquals("http://example.com/same", result.get(0));
+    }
+
+    @Test
+    public void test_getAnchorList_duplicatesWithLinkTag() throws Exception {
+        final String data = "<html><head>" + "<link rel=\"stylesheet\" href=\"http://example.com/style.css\">"
+                + "<link rel=\"icon\" href=\"http://example.com/icon.png\">" + "</head><body>"
+                + "<a href=\"http://example.com/style.css\">css link</a>" + "<a href=\"http://example.com/page1\">page1</a>"
+                + "</body></html>";
+        final Document document = getDocument(data);
+
+        final FessXpathTransformer transformer = createAnchorListTransformer();
+        final Map<String, String> rules = new LinkedHashMap<>();
+        rules.put("//A", "href");
+        rules.put("//LINK", "href");
+        transformer.setChildUrlRuleMap(rules);
+
+        final ResponseData responseData = new ResponseData();
+        responseData.setUrl("http://example.com/");
+        responseData.setCharSet("UTF-8");
+
+        final List<String> result = transformer.getAnchorList(document, responseData);
+        assertEquals(3, result.size());
+        assertTrue(result.contains("http://example.com/style.css"));
+        assertTrue(result.contains("http://example.com/icon.png"));
+        assertTrue(result.contains("http://example.com/page1"));
+    }
+
+    @Test
+    public void test_getAnchorList_relativeUrlWithSpace() throws Exception {
+        final String data = "<html><body><a href=\"page 2.html\">link</a></body></html>";
+        final Document document = getDocument(data);
+
+        final FessXpathTransformer transformer = createAnchorListTransformer();
+        final Map<String, String> rules = new LinkedHashMap<>();
+        rules.put("//A", "href");
+        transformer.setChildUrlRuleMap(rules);
+
+        final ResponseData responseData = new ResponseData();
+        responseData.setUrl("http://example.com/dir/test.html");
+        responseData.setCharSet("UTF-8");
+
+        final List<String> result = transformer.getAnchorList(document, responseData);
+        assertEquals(1, result.size());
+        assertEquals("http://example.com/dir/page%202.html", result.get(0));
+    }
+
+    @Test
+    public void test_getAnchorList_absolutePathWithSpace() throws Exception {
+        final String data = "<html><body><a href=\"/path with space/page.html\">link</a></body></html>";
+        final Document document = getDocument(data);
+
+        final FessXpathTransformer transformer = createAnchorListTransformer();
+        final Map<String, String> rules = new LinkedHashMap<>();
+        rules.put("//A", "href");
+        transformer.setChildUrlRuleMap(rules);
+
+        final ResponseData responseData = new ResponseData();
+        responseData.setUrl("http://example.com/dir/test.html");
+        responseData.setCharSet("UTF-8");
+
+        final List<String> result = transformer.getAnchorList(document, responseData);
+        assertEquals(1, result.size());
+        assertEquals("http://example.com/path%20with%20space/page.html", result.get(0));
+    }
+
+    @Test
+    public void test_getAnchorList_protocolRelativeWithSpace() throws Exception {
+        final String data = "<html><body><a href=\"//cdn.example.com/a b.js\">link</a></body></html>";
+        final Document document = getDocument(data);
+
+        final FessXpathTransformer transformer = createAnchorListTransformer();
+        final Map<String, String> rules = new LinkedHashMap<>();
+        rules.put("//A", "href");
+        transformer.setChildUrlRuleMap(rules);
+
+        final ResponseData responseData = new ResponseData();
+        responseData.setUrl("http://example.com/test.html");
+        responseData.setCharSet("UTF-8");
+
+        final List<String> result = transformer.getAnchorList(document, responseData);
+        assertEquals(1, result.size());
+        assertEquals("http://cdn.example.com/a%20b.js", result.get(0));
+    }
+
+    @Test
+    public void test_getAnchorList_parentTraversalWithSpace() throws Exception {
+        final String data = "<html><body><a href=\"../page 2.html\">link</a></body></html>";
+        final Document document = getDocument(data);
+
+        final FessXpathTransformer transformer = createAnchorListTransformer();
+        final Map<String, String> rules = new LinkedHashMap<>();
+        rules.put("//A", "href");
+        transformer.setChildUrlRuleMap(rules);
+
+        final ResponseData responseData = new ResponseData();
+        responseData.setUrl("http://example.com/dir/sub/test.html");
+        responseData.setCharSet("UTF-8");
+
+        final List<String> result = transformer.getAnchorList(document, responseData);
+        assertEquals(1, result.size());
+        assertEquals("http://example.com/dir/page%202.html", result.get(0));
+    }
+
+    @Test
+    public void test_getAnchorList_parentTraversalAboveRootWithSpace() throws Exception {
+        final String data = "<html><body><a href=\"/../page 2.html\">link</a></body></html>";
+        final Document document = getDocument(data);
+
+        final FessXpathTransformer transformer = createAnchorListTransformer();
+        final Map<String, String> rules = new LinkedHashMap<>();
+        rules.put("//A", "href");
+        transformer.setChildUrlRuleMap(rules);
+
+        final ResponseData responseData = new ResponseData();
+        responseData.setUrl("http://example.com/test.html");
+        responseData.setCharSet("UTF-8");
+
+        final List<String> result = transformer.getAnchorList(document, responseData);
+        assertEquals(1, result.size());
+        assertEquals("http://example.com/page%202.html", result.get(0));
+    }
+
+    @Test
+    public void test_getAnchorList_parentTraversalFromRootWithSpace() throws Exception {
+        final String data = "<html><body><a href=\"../page 2.html\">link</a></body></html>";
+        final Document document = getDocument(data);
+
+        final FessXpathTransformer transformer = createAnchorListTransformer();
+        final Map<String, String> rules = new LinkedHashMap<>();
+        rules.put("//A", "href");
+        transformer.setChildUrlRuleMap(rules);
+
+        final ResponseData responseData = new ResponseData();
+        responseData.setUrl("http://example.com/test.html");
+        responseData.setCharSet("UTF-8");
+
+        final List<String> result = transformer.getAnchorList(document, responseData);
+        assertEquals(1, result.size());
+        assertEquals("http://example.com/page%202.html", result.get(0));
+    }
+
+    private FessXpathTransformer createAnchorListTransformer() {
+        final FessXpathTransformer transformer = new FessXpathTransformer() {
+            @Override
+            protected PathMappingHelper getPathMappingHelper() {
+                return new PathMappingHelper();
+            }
+        };
+        transformer.init();
+        return transformer;
+    }
+
+    @Test
+    public void test_htmlEntity_numericDecimal() throws Exception {
+        final String data = "<html><head><title>&#214;sterreich</title></head><body></body></html>";
+        final Document document = getDocument(data);
+        final String title = document.getElementsByTagName("TITLE").item(0).getTextContent();
+        assertEquals("\u00D6sterreich", title);
+    }
+
+    @Test
+    public void test_htmlEntity_numericHex() throws Exception {
+        final String data = "<html><head><title>&#xD6;sterreich</title></head><body></body></html>";
+        final Document document = getDocument(data);
+        final String title = document.getElementsByTagName("TITLE").item(0).getTextContent();
+        assertEquals("\u00D6sterreich", title);
+    }
+
+    @Test
+    public void test_htmlEntity_namedEntity() throws Exception {
+        final String data = "<html><head><title>&Ouml;sterreich</title></head><body></body></html>";
+        final Document document = getDocument(data);
+        final String title = document.getElementsByTagName("TITLE").item(0).getTextContent();
+        assertEquals("\u00D6sterreich", title);
+    }
+
+    @Test
+    public void test_htmlEntity_inMetaDescription() throws Exception {
+        final String data = "<html><head><meta name=\"description\" content=\"&#214;ffnungszeiten\"/></head><body></body></html>";
+        final Document document = getDocument(data);
+        final org.w3c.dom.NodeList metaNodes = document.getElementsByTagName("META");
+        String description = null;
+        for (int i = 0; i < metaNodes.getLength(); i++) {
+            final org.w3c.dom.Element meta = (org.w3c.dom.Element) metaNodes.item(i);
+            if ("description".equals(meta.getAttribute("name"))) {
+                description = meta.getAttribute("content");
+                break;
+            }
+        }
+        assertEquals("\u00D6ffnungszeiten", description);
+    }
+
+    @Test
+    public void test_htmlEntity_multipleEntities() throws Exception {
+        final String data = "<html><head><title>&#196;pfel und &#214;pfel</title></head><body></body></html>";
+        final Document document = getDocument(data);
+        final String title = document.getElementsByTagName("TITLE").item(0).getTextContent();
+        assertEquals("\u00C4pfel und \u00D6pfel", title);
+    }
+
+    @Test
+    public void test_htmlEntity_mixedContent() throws Exception {
+        final String data = "<html><body><p>Caf&#233; &amp; Bar</p></body></html>";
+        final Document document = getDocument(data);
+        final String bodyText = document.getElementsByTagName("BODY").item(0).getTextContent();
+        assertTrue(bodyText.contains("Caf\u00E9"));
+        assertTrue(bodyText.contains("& Bar"));
+    }
+
+    @Test
+    public void test_htmlEntity_inBody() throws Exception {
+        final String data = "<html><body>Gr&#252;&#223;e</body></html>";
+        final Document document = getDocument(data);
+        final String bodyText = document.getElementsByTagName("BODY").item(0).getTextContent();
+        assertTrue(bodyText.contains("Gr\u00FC\u00DFe"));
+    }
+
+    @Test
+    public void test_normalizeCanonicalUrl_withBrackets() throws Exception {
+        final FessXpathTransformer transformer = new FessXpathTransformer();
+        // topic/2732: java.net.URL accepts brackets in paths unlike java.net.URI
+        final String value = transformer.normalizeCanonicalUrl("http://example.com/", "/path/[id]/page");
+        assertEquals("http://example.com/path/[id]/page", value);
+    }
+
+    @Test
+    public void test_normalizeCanonicalUrl_withPercent() throws Exception {
+        final FessXpathTransformer transformer = new FessXpathTransformer();
+        final String value = transformer.normalizeCanonicalUrl("http://example.com/", "/100%25/done");
+        assertNotNull(value);
+        assertEquals("http://example.com/100%25/done", value);
+    }
+
+    @Test
+    public void test_normalizeCanonicalUrl_withQueryAndFragment() throws Exception {
+        final FessXpathTransformer transformer = new FessXpathTransformer();
+        final String value = transformer.normalizeCanonicalUrl("http://example.com/", "/page?q=test#section");
+        assertNotNull(value);
+        assertEquals("http://example.com/page?q=test#section", value);
+    }
+
+    @Test
+    public void test_getURL_withNull() throws Exception {
+        final FessXpathTransformer transformer = new FessXpathTransformer();
+        final URL value = transformer.getURL("http://example.com/", null);
+        assertNull(value);
+    }
+
+    @Test
+    public void test_getURL_withProtocolRelative() throws Exception {
+        final FessXpathTransformer transformer = new FessXpathTransformer();
+        final URL value = transformer.getURL("http://example.com/", "://cdn.example.com/file.js");
+        assertNotNull(value);
+        assertEquals("http://cdn.example.com/file.js", value.toExternalForm());
+    }
+
+    @Test
+    public void test_getURL_withRelativePath() throws Exception {
+        final FessXpathTransformer transformer = new FessXpathTransformer();
+        final URL value = transformer.getURL("http://example.com/dir/page.html", "other.html");
+        assertNotNull(value);
+        assertEquals("http://example.com/dir/other.html", value.toExternalForm());
+    }
+
+    @Test
+    public void test_isValidUrl_withBrackets() {
+        final FessXpathTransformer transformer = new FessXpathTransformer();
+        // topic/2732: java.net.URL accepts brackets in paths, so this is valid
+        assertTrue(transformer.isValidUrl("http://example.com/[test]/page"));
+    }
+
+    @Test
+    public void test_isValidUrl_withCustomScheme() {
+        final FessXpathTransformer transformer = new FessXpathTransformer();
+        // topic/2732: java.net.URL does not support smb:// scheme, so isValidUrl returns false
+        assertFalse(transformer.isValidUrl("smb://server/share/file"));
+    }
+
+    @Test
+    public void test_normalizeCanonicalUrl_malformedReturnsNull() throws Exception {
+        final FessXpathTransformer transformer = new FessXpathTransformer();
+        // Completely invalid base URL should return null
+        final String value = transformer.normalizeCanonicalUrl("not-a-url", "/page");
+        assertNull(value);
+    }
+
+    @Test
+    public void test_getURL_withMalformedBase() throws Exception {
+        final FessXpathTransformer transformer = new FessXpathTransformer();
+        try {
+            transformer.getURL("not-a-url", "/page");
+            fail();
+        } catch (final Exception e) {
+            // MalformedURLException expected for invalid base URL
+        }
+    }
+
+    @Test
+    public void test_normalizeCanonicalUrl_withMalformedRelative() throws Exception {
+        final FessXpathTransformer transformer = new FessXpathTransformer();
+        // Valid base URL with malformed relative: java.net.URL is lenient, resolves anyway
+        final String value = transformer.normalizeCanonicalUrl("http://example.com/", "://");
+        // java.net.URL(base, "://") prepends protocol, result may vary
+        // The key point: no exception is thrown and a result is returned
+        assertNotNull(value);
+    }
+
+    @Test
+    public void test_getURL_withMalformedRelative() throws Exception {
+        final FessXpathTransformer transformer = new FessXpathTransformer();
+        // Valid base with empty-authority relative: java.net.URL is lenient
+        final URL value = transformer.getURL("http://example.com/", "page with spaces");
+        // java.net.URL accepts spaces in path (unlike URI)
+        assertNotNull(value);
+        assertTrue(value.toExternalForm().contains("page with spaces"));
+    }
+
+    @Test
+    public void test_normalizeCanonicalUrl_withCustomSchemeRelative() throws Exception {
+        final FessXpathTransformer transformer = new FessXpathTransformer();
+        // URI→URL migration: java.net.URL rejects unknown schemes like javascript:
+        final String value = transformer.normalizeCanonicalUrl("http://example.com/", "javascript:void(0)");
+        // normalizeCanonicalUrl catches MalformedURLException and returns null
+        assertNull(value);
+    }
+}

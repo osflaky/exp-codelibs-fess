@@ -1,0 +1,628 @@
+/*
+ * Copyright 2012-2025 CodeLibs Project and the Others.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND,
+ * either express or implied. See the License for the specific language
+ * governing permissions and limitations under the License.
+ */
+package org.codelibs.fess.app.web.admin.general;
+
+import org.lastaflute.web.validation.Required;
+import org.lastaflute.web.validation.theme.conversion.ValidateTypeFailure;
+
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.Size;
+
+/**
+ * Form class for editing general system settings in the admin interface.
+ * This form handles global configuration settings that affect the entire Fess system,
+ * including crawling behavior, authentication, logging, and various system parameters.
+ *
+ */
+public class EditForm {
+
+    /**
+     * Creates a new EditForm instance.
+     */
+    public EditForm() {
+        // Default constructor
+    }
+
+    /**
+     * Enable or disable incremental crawling.
+     * When enabled, only new or modified documents are crawled.
+     */
+    @Size(max = 10)
+    public String incrementalCrawling;
+
+    /**
+     * Number of days to keep crawled documents before cleanup.
+     * Set to -1 to disable automatic cleanup.
+     */
+    @Required
+    @Min(-1)
+    @Max(1000)
+    @ValidateTypeFailure
+    public Integer dayForCleanup;
+
+    /**
+     * Number of threads to use for crawling operations.
+     * Higher values increase crawling speed but consume more resources.
+     */
+    @Required
+    @Min(0)
+    @Max(100)
+    @ValidateTypeFailure
+    public Integer crawlingThreadCount;
+
+    /**
+     * Enable or disable search query logging.
+     * When enabled, user search queries are logged for analysis.
+     */
+    @Size(max = 10)
+    public String searchLog;
+
+    /**
+     * Enable or disable user information tracking.
+     * When enabled, user information is stored and tracked.
+     */
+    @Size(max = 10)
+    public String userInfo;
+
+    /**
+     * Enable or disable user favorite functionality.
+     * When enabled, users can save favorite search results.
+     */
+    @Size(max = 10)
+    public String userFavorite;
+
+    /**
+     * Enable or disable JSON Web API.
+     * When enabled, search results can be retrieved via JSON API.
+     */
+    @Size(max = 10)
+    public String webApiJson;
+
+    /**
+     * Application-specific value for custom configurations.
+     * This field can be used to store custom application settings.
+     */
+    @Size(max = 10000)
+    public String appValue;
+
+    /**
+     * Default label value to use when no specific label is selected.
+     * This affects which documents are included in search results by default.
+     */
+    @Size(max = 1000)
+    public String defaultLabelValue;
+
+    /**
+     * Default sort order for search results.
+     * Defines how search results are ordered when no specific sort is requested.
+     */
+    @Size(max = 1000)
+    public String defaultSortValue;
+
+    /**
+     * Virtual host configuration for multi-tenant setups.
+     * Allows different search configurations based on the request host.
+     */
+    @Size(max = 10000)
+    public String virtualHostValue;
+
+    /**
+     * Enable or disable appending query parameters to search URLs.
+     * When enabled, additional parameters are added to search result URLs.
+     */
+    @Size(max = 10)
+    public String appendQueryParameter;
+
+    /**
+     * Enable or disable login requirement for search access.
+     * When enabled, users must authenticate before performing searches.
+     */
+    @Size(max = 10)
+    public String loginRequired;
+
+    /**
+     * Enable or disable result collapsing for similar documents.
+     * When enabled, similar search results are grouped together.
+     */
+    @Size(max = 10)
+    public String resultCollapsed;
+
+    /**
+     * Enable or disable display of login link in the search interface.
+     * When enabled, a login link is shown to unauthenticated users.
+     */
+    @Size(max = 10)
+    public String loginLink;
+
+    /**
+     * Enable or disable thumbnail generation for documents.
+     * When enabled, thumbnails are generated for supported file types.
+     */
+    @Size(max = 10)
+    public String thumbnail;
+
+    /**
+     * Types of crawling failures to ignore during crawling operations.
+     * Specified failure types will not be logged or counted as errors.
+     */
+    @Size(max = 1000)
+    public String ignoreFailureType;
+
+    /**
+     * Threshold for failure count before stopping crawling of a URL.
+     * Set to -1 to disable the threshold check.
+     */
+    @Required
+    @Min(-1)
+    @Max(10000)
+    @ValidateTypeFailure
+    public Integer failureCountThreshold;
+
+    /**
+     * Enable or disable popular word tracking and display.
+     * When enabled, frequently searched terms are tracked and displayed.
+     */
+    @Size(max = 10)
+    public String popularWord;
+
+    /**
+     * Character encoding to use for CSV file exports.
+     * This setting affects the encoding of downloaded CSV files.
+     */
+    @Required
+    @Size(max = 20)
+    public String csvFileEncoding;
+
+    /**
+     * Number of days to keep search logs before purging.
+     * Set to -1 to disable automatic purging of search logs.
+     */
+    @Min(-1)
+    @Max(100000)
+    @ValidateTypeFailure
+    public Integer purgeSearchLogDay;
+
+    /**
+     * Number of days to keep job logs before purging.
+     * Set to -1 to disable automatic purging of job logs.
+     */
+    @Min(-1)
+    @Max(100000)
+    @ValidateTypeFailure
+    public Integer purgeJobLogDay;
+
+    /**
+     * Number of days to keep user information before purging.
+     * Set to -1 to disable automatic purging of user information.
+     */
+    @Min(-1)
+    @Max(100000)
+    @ValidateTypeFailure
+    public Integer purgeUserInfoDay;
+
+    /**
+     * Bot user agents whose search logs should be purged.
+     * Search logs from these bots will be automatically removed.
+     */
+    @Size(max = 10000)
+    public String purgeByBots;
+
+    /**
+     * Email addresses to receive system notifications.
+     * Multiple addresses can be specified, separated by commas.
+     */
+    @Size(max = 1000)
+    public String notificationTo;
+
+    /**
+     * Enable or disable search suggestions based on search logs.
+     * When enabled, suggestions are generated from previous searches.
+     */
+    @Size(max = 10)
+    public String suggestSearchLog;
+
+    /**
+     * Enable or disable search suggestions based on document content.
+     * When enabled, suggestions are generated from indexed documents.
+     */
+    @Size(max = 10)
+    public String suggestDocuments;
+
+    /**
+     * Number of days to keep suggestion search logs before purging.
+     * Set to 0 to disable purging of suggestion search logs.
+     */
+    @Min(0)
+    @Max(100000)
+    @ValidateTypeFailure
+    public Integer purgeSuggestSearchLogDay;
+
+    /**
+     * LDAP server URL for authentication.
+     * Used when LDAP authentication is enabled.
+     */
+    @Size(max = 1000)
+    public String ldapProviderUrl;
+
+    /**
+     * LDAP security principal for binding to the LDAP server.
+     * Used for authenticating with the LDAP server.
+     */
+    @Size(max = 1000)
+    public String ldapSecurityPrincipal;
+
+    /**
+     * LDAP admin security principal for administrative operations.
+     * Used for admin-level operations on the LDAP server.
+     */
+    @Size(max = 1000)
+    public String ldapAdminSecurityPrincipal;
+
+    /**
+     * LDAP admin security credentials (password) for administrative operations.
+     * Used in conjunction with the admin security principal.
+     */
+    @Size(max = 1000)
+    public String ldapAdminSecurityCredentials;
+
+    /**
+     * LDAP base DN (Distinguished Name) for user searches.
+     * Defines the root of the LDAP directory tree for user lookups.
+     */
+    @Size(max = 1000)
+    public String ldapBaseDn;
+
+    /**
+     * LDAP filter for finding user accounts.
+     * Defines the search filter used to locate user accounts in LDAP.
+     */
+    @Size(max = 1000)
+    public String ldapAccountFilter;
+
+    /**
+     * LDAP filter for finding groups.
+     * Defines the search filter used to locate groups in LDAP.
+     */
+    @Size(max = 1000)
+    public String ldapGroupFilter;
+
+    /**
+     * LDAP attribute name for group membership.
+     * Specifies which LDAP attribute contains group membership information.
+     */
+    @Size(max = 100)
+    public String ldapMemberofAttribute;
+
+    /**
+     * Notification message displayed on the login page.
+     * This message is shown to users on the authentication page.
+     */
+    @Size(max = 3000)
+    public String notificationLogin;
+
+    /**
+     * Notification message displayed on the search top page.
+     * This message is shown to users on the main search page.
+     */
+    @Size(max = 3000)
+    public String notificationSearchTop;
+
+    /**
+     * System log level for controlling log verbosity.
+     * Controls the level of detail in system log messages.
+     */
+    @Size(max = 10)
+    public String logLevel;
+
+    /**
+     * Storage service endpoint URL for cloud storage integration.
+     * Used for storing files in cloud storage services like S3.
+     */
+    @Size(max = 1000)
+    public String storageEndpoint;
+
+    /**
+     * Access key for cloud storage authentication.
+     * Used to authenticate with cloud storage services.
+     */
+    @Size(max = 1000)
+    public String storageAccessKey;
+
+    /**
+     * Secret key for cloud storage authentication.
+     * Used in conjunction with the access key for cloud storage.
+     */
+    @Size(max = 1000)
+    public String storageSecretKey;
+
+    /**
+     * Storage bucket name for cloud storage operations.
+     * Specifies which bucket to use for storing files in cloud storage.
+     */
+    @Size(max = 1000)
+    public String storageBucket;
+
+    /**
+     * Storage type for cloud storage (s3, gcs, auto).
+     * Determines which storage client to use.
+     */
+    @Size(max = 20)
+    public String storageType;
+
+    /**
+     * Storage region for S3.
+     * AWS region where the S3 bucket is located.
+     */
+    @Size(max = 100)
+    public String storageRegion;
+
+    /**
+     * GCS project ID.
+     * Google Cloud project ID for GCS storage.
+     */
+    @Size(max = 200)
+    public String storageProjectId;
+
+    /**
+     * Storage credentials file path for GCS.
+     * Path to the service account credentials JSON file.
+     */
+    @Size(max = 1000)
+    public String storageCredentialsPath;
+
+    /**
+     * RAG LLM provider name.
+     * Selects which LLM client to use for RAG operations.
+     */
+    @Size(max = 100)
+    public String ragLlmName;
+
+    /**
+     * LLM log level.
+     * Controls the logging level for LLM-related packages.
+     */
+    @Size(max = 10)
+    public String llmLogLevel;
+
+    /** Enable or disable search file proxy. */
+    @Size(max = 10)
+    public String searchFileProxy;
+
+    /** Enable or disable using browser locale for search. */
+    @Size(max = 10)
+    public String searchUseBrowserLocale;
+
+    /** SSO type (none, oic, saml, spnego, entraid). */
+    @Size(max = 100)
+    public String ssoType;
+
+    /** User agent string for crawling operations. */
+    @Size(max = 1000)
+    public String crawlingUserAgent;
+
+    /** Notification message displayed on the advanced search page. */
+    @Size(max = 3000)
+    public String notificationAdvanceSearch;
+
+    /** Slack webhook URLs for notifications. */
+    @Size(max = 10000)
+    public String slackWebhookUrls;
+
+    /** Google Chat webhook URLs for notifications. */
+    @Size(max = 10000)
+    public String googleChatWebhookUrls;
+
+    /** Enable or disable log notification for ERROR/WARN logs. */
+    @Size(max = 10)
+    public String logNotificationEnabled;
+
+    /** Log notification level (e.g. ERROR, WARN, INFO). */
+    @Size(max = 10)
+    public String logNotificationLevel;
+
+    /** LDAP security authentication type. */
+    @Size(max = 1000)
+    public String ldapSecurityAuthentication;
+
+    /** LDAP initial context factory class name. */
+    @Size(max = 1000)
+    public String ldapInitialContextFactory;
+
+    /** OpenID Connect client ID. */
+    @Size(max = 1000)
+    public String oicClientId;
+
+    /** OpenID Connect client secret. */
+    @Size(max = 1000)
+    public String oicClientSecret;
+
+    /** OpenID Connect authorization server URL. */
+    @Size(max = 1000)
+    public String oicAuthServerUrl;
+
+    /** OpenID Connect token server URL. */
+    @Size(max = 1000)
+    public String oicTokenServerUrl;
+
+    /** OpenID Connect redirect URL. */
+    @Size(max = 1000)
+    public String oicRedirectUrl;
+
+    /** OpenID Connect scope. */
+    @Size(max = 1000)
+    public String oicScope;
+
+    /** OpenID Connect base URL. */
+    @Size(max = 1000)
+    public String oicBaseUrl;
+
+    /** OpenID Connect default groups. */
+    @Size(max = 1000)
+    public String oicDefaultGroups;
+
+    /** OpenID Connect default roles. */
+    @Size(max = 1000)
+    public String oicDefaultRoles;
+
+    /** SAML Identity Provider Entity ID. */
+    @Size(max = 1000)
+    public String samlIdpEntityid;
+
+    /** SAML Identity Provider Single Sign-On Service URL. */
+    @Size(max = 1000)
+    public String samlIdpSingleSignOnServiceUrl;
+
+    /** SAML Identity Provider Single Logout Service URL. */
+    @Size(max = 1000)
+    public String samlIdpSingleLogoutServiceUrl;
+
+    /** SAML Identity Provider X.509 Certificate. */
+    @Size(max = 10000)
+    public String samlIdpX509cert;
+
+    /** SAML service provider base URL. */
+    @Size(max = 1000)
+    public String samlSpBaseUrl;
+
+    /** SAML Service Provider Entity ID. */
+    @Size(max = 1000)
+    public String samlSpEntityid;
+
+    /** SAML Assertion Consumer Service URL. */
+    @Size(max = 1000)
+    public String samlSpAssertionConsumerServiceUrl;
+
+    /** SAML Service Provider Single Logout Service URL. */
+    @Size(max = 1000)
+    public String samlSpSingleLogoutServiceUrl;
+
+    /** SAML Service Provider NameID Format. */
+    @Size(max = 1000)
+    public String samlSpNameidformat;
+
+    /** SAML attribute name for group membership. */
+    @Size(max = 1000)
+    public String samlAttributeGroupName;
+
+    /** SAML attribute name for role membership. */
+    @Size(max = 1000)
+    public String samlAttributeRoleName;
+
+    /** SAML default groups. */
+    @Size(max = 1000)
+    public String samlDefaultGroups;
+
+    /** SAML default roles. */
+    @Size(max = 1000)
+    public String samlDefaultRoles;
+
+    /** SPNEGO Kerberos 5 configuration file path. */
+    @Size(max = 1000)
+    public String spnegoKrb5Conf;
+
+    /** SPNEGO JAAS login configuration file path. */
+    @Size(max = 1000)
+    public String spnegoLoginConf;
+
+    /** SPNEGO JAAS login client module name. */
+    @Size(max = 1000)
+    public String spnegoLoginClientModule;
+
+    /** SPNEGO JAAS login server module name. */
+    @Size(max = 1000)
+    public String spnegoLoginServerModule;
+
+    /** SPNEGO pre-authentication username. */
+    @Size(max = 1000)
+    public String spnegoPreauthUsername;
+
+    /** SPNEGO pre-authentication password. */
+    @Size(max = 1000)
+    public String spnegoPreauthPassword;
+
+    /** Enable or disable SPNEGO basic authentication. */
+    @Size(max = 10)
+    public String spnegoAllowBasic;
+
+    /** Enable or disable SPNEGO unsecure basic authentication. */
+    @Size(max = 10)
+    public String spnegoAllowUnsecureBasic;
+
+    /** Enable or disable SPNEGO NTLM prompt. */
+    @Size(max = 10)
+    public String spnegoPromptNtlm;
+
+    /** Enable or disable SPNEGO localhost authentication. */
+    @Size(max = 10)
+    public String spnegoAllowLocalhost;
+
+    /** Enable or disable SPNEGO credential delegation. */
+    @Size(max = 10)
+    public String spnegoAllowDelegation;
+
+    /** Comma-separated Kerberos realms accepted in addition to the server realm. */
+    @Size(max = 1000)
+    public String spnegoAllowedRealms;
+
+    /** SPNEGO logger level (0-7, auto-detected if empty). */
+    @Size(max = 10)
+    public String spnegoLoggerLevel;
+
+    /** Entra ID application client ID. */
+    @Size(max = 1000)
+    public String entraidClientId;
+
+    /** Entra ID application client secret. */
+    @Size(max = 1000)
+    public String entraidClientSecret;
+
+    /** Entra ID tenant ID. */
+    @Size(max = 1000)
+    public String entraidTenant;
+
+    /** Entra ID authority URL. */
+    @Size(max = 1000)
+    public String entraidAuthority;
+
+    /** Entra ID OAuth2 reply URL. */
+    @Size(max = 1000)
+    public String entraidReplyUrl;
+
+    /** Entra ID OAuth2 authorization response mode (query or form_post). */
+    @Size(max = 100)
+    public String entraidResponseMode;
+
+    /** Entra ID state parameter TTL in seconds. */
+    @Size(max = 100)
+    public String entraidStateTtl;
+
+    /** Entra ID default groups. */
+    @Size(max = 1000)
+    public String entraidDefaultGroups;
+
+    /** Entra ID default roles. */
+    @Size(max = 1000)
+    public String entraidDefaultRoles;
+
+    /** Entra ID permission field names. */
+    @Size(max = 1000)
+    public String entraidPermissionFields;
+
+    /** Enable or disable Entra ID domain services. */
+    @Size(max = 10)
+    public String entraidUseDs;
+}

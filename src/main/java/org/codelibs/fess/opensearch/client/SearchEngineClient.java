@@ -1,0 +1,3707 @@
+/*
+ * Copyright 2012-2025 CodeLibs Project and the Others.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND,
+ * either express or implied. See the License for the specific language
+ * governing permissions and limitations under the License.
+ */
+package org.codelibs.fess.opensearch.client;
+
+import static org.codelibs.core.stream.StreamUtil.split;
+import static org.codelibs.core.stream.StreamUtil.stream;
+import static org.codelibs.fesen.opensearch.core.action.ActionListener.wrap;
+
+import java.io.File;
+import java.io.IOException;
+import java.net.InetAddress;
+import java.net.UnknownHostException;
+import java.nio.charset.StandardCharsets;
+import java.text.SimpleDateFormat;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Map.Entry;
+import java.util.Set;
+import java.util.function.BiConsumer;
+import java.util.function.BiFunction;
+import java.util.function.Function;
+import java.util.function.UnaryOperator;
+import java.util.regex.Pattern;
+import java.util.stream.Collectors;
+
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+import org.codelibs.core.beans.util.BeanUtil;
+import org.codelibs.core.exception.ResourceNotFoundRuntimeException;
+import org.codelibs.core.io.FileUtil;
+import org.codelibs.core.io.ResourceUtil;
+import org.codelibs.core.lang.StringUtil;
+import org.codelibs.core.lang.ThreadUtil;
+import org.codelibs.curl.CurlResponse;
+import org.codelibs.fesen.client.EngineInfo;
+import org.codelibs.fesen.client.EngineInfo.EngineType;
+import org.codelibs.fesen.client.HttpClient;
+import org.codelibs.fess.Constants;
+import org.codelibs.fess.entity.FacetInfo;
+import org.codelibs.fess.entity.GeoInfo;
+import org.codelibs.fess.entity.HighlightInfo;
+import org.codelibs.fess.entity.PingResponse;
+import org.codelibs.fess.entity.QueryContext;
+import org.codelibs.fess.entity.SearchRequestParams.SearchRequestType;
+import org.codelibs.fess.exception.FessSystemException;
+import org.codelibs.fess.exception.InvalidQueryException;
+import org.codelibs.fess.exception.ResultOffsetExceededException;
+import org.codelibs.fess.helper.ChunkVectorHelper;
+import org.codelibs.fess.helper.DocumentHelper;
+import org.codelibs.fess.helper.QueryHelper;
+import org.codelibs.fess.helper.SystemHelper;
+import org.codelibs.fess.mylasta.direction.FessConfig;
+import org.codelibs.fess.query.QueryFieldConfig;
+import org.codelibs.fess.util.BooleanFunction;
+import org.codelibs.fess.util.ComponentUtil;
+import org.codelibs.fess.util.DocMap;
+import org.codelibs.fess.util.SearchEngineUtil;
+import org.codelibs.fess.util.SystemUtil;
+import org.codelibs.fess.util.SearchEngineCurl;
+import org.dbflute.exception.IllegalBehaviorStateException;
+import org.dbflute.optional.OptionalEntity;
+import org.lastaflute.core.message.UserMessages;
+import org.lastaflute.di.exception.ContainerInitFailureException;
+import org.codelibs.fesen.opensearch.OpenSearchException;
+import org.codelibs.fesen.opensearch.OpenSearchStatusException;
+import org.codelibs.fesen.opensearch.action.ActionRequest;
+import org.codelibs.fesen.opensearch.action.ActionType;
+import org.codelibs.fesen.opensearch.action.DocWriteRequest.OpType;
+import org.codelibs.fesen.opensearch.action.DocWriteResponse.Result;
+import org.codelibs.fesen.opensearch.action.admin.cluster.health.ClusterHealthResponse;
+import org.codelibs.fesen.opensearch.action.admin.indices.alias.IndicesAliasesRequestBuilder;
+import org.codelibs.fesen.opensearch.action.admin.indices.create.CreateIndexRequestBuilder;
+import org.codelibs.fesen.opensearch.action.admin.indices.create.CreateIndexResponse;
+import org.codelibs.fesen.opensearch.action.admin.indices.exists.indices.IndicesExistsResponse;
+import org.codelibs.fesen.opensearch.action.admin.indices.flush.FlushResponse;
+import org.codelibs.fesen.opensearch.action.admin.indices.get.GetIndexResponse;
+import org.codelibs.fesen.opensearch.action.admin.indices.mapping.get.GetMappingsResponse;
+import org.codelibs.fesen.opensearch.action.admin.indices.refresh.RefreshResponse;
+import org.codelibs.fesen.opensearch.action.bulk.BulkRequest;
+import org.codelibs.fesen.opensearch.action.bulk.BulkRequestBuilder;
+import org.codelibs.fesen.opensearch.action.bulk.BulkResponse;
+import org.codelibs.fesen.opensearch.action.delete.DeleteRequest;
+import org.codelibs.fesen.opensearch.action.delete.DeleteRequestBuilder;
+import org.codelibs.fesen.opensearch.action.delete.DeleteResponse;
+import org.codelibs.fesen.opensearch.action.explain.ExplainRequest;
+import org.codelibs.fesen.opensearch.action.explain.ExplainRequestBuilder;
+import org.codelibs.fesen.opensearch.action.explain.ExplainResponse;
+import org.codelibs.fesen.opensearch.action.fieldcaps.FieldCapabilitiesRequest;
+import org.codelibs.fesen.opensearch.action.fieldcaps.FieldCapabilitiesRequestBuilder;
+import org.codelibs.fesen.opensearch.action.fieldcaps.FieldCapabilitiesResponse;
+import org.codelibs.fesen.opensearch.action.get.GetRequest;
+import org.codelibs.fesen.opensearch.action.get.GetRequestBuilder;
+import org.codelibs.fesen.opensearch.action.get.GetResponse;
+import org.codelibs.fesen.opensearch.action.get.MultiGetRequest;
+import org.codelibs.fesen.opensearch.action.get.MultiGetRequestBuilder;
+import org.codelibs.fesen.opensearch.action.get.MultiGetResponse;
+import org.codelibs.fesen.opensearch.action.index.IndexRequest;
+import org.codelibs.fesen.opensearch.action.index.IndexRequestBuilder;
+import org.codelibs.fesen.opensearch.action.index.IndexResponse;
+import org.codelibs.fesen.opensearch.action.search.ClearScrollRequest;
+import org.codelibs.fesen.opensearch.action.search.ClearScrollRequestBuilder;
+import org.codelibs.fesen.opensearch.action.search.ClearScrollResponse;
+import org.codelibs.fesen.opensearch.action.search.CreatePitAction;
+import org.codelibs.fesen.opensearch.action.search.CreatePitRequest;
+import org.codelibs.fesen.opensearch.action.search.CreatePitResponse;
+import org.codelibs.fesen.opensearch.action.search.DeletePitRequest;
+import org.codelibs.fesen.opensearch.action.search.DeletePitResponse;
+import org.codelibs.fesen.opensearch.action.search.GetAllPitNodesRequest;
+import org.codelibs.fesen.opensearch.action.search.GetAllPitNodesResponse;
+import org.codelibs.fesen.opensearch.action.search.MultiSearchRequest;
+import org.codelibs.fesen.opensearch.action.search.MultiSearchRequestBuilder;
+import org.codelibs.fesen.opensearch.action.search.MultiSearchResponse;
+import org.codelibs.fesen.opensearch.action.search.SearchPhaseExecutionException;
+import org.codelibs.fesen.opensearch.action.search.SearchRequest;
+import org.codelibs.fesen.opensearch.action.search.SearchRequestBuilder;
+import org.codelibs.fesen.opensearch.action.search.SearchResponse;
+import org.codelibs.fesen.opensearch.action.search.SearchScrollRequest;
+import org.codelibs.fesen.opensearch.action.search.SearchScrollRequestBuilder;
+import org.codelibs.fesen.opensearch.action.support.WriteRequest.RefreshPolicy;
+import org.codelibs.fesen.opensearch.action.support.clustermanager.AcknowledgedResponse;
+import org.codelibs.fesen.opensearch.action.termvectors.MultiTermVectorsRequest;
+import org.codelibs.fesen.opensearch.action.termvectors.MultiTermVectorsRequestBuilder;
+import org.codelibs.fesen.opensearch.action.termvectors.MultiTermVectorsResponse;
+import org.codelibs.fesen.opensearch.action.termvectors.TermVectorsRequest;
+import org.codelibs.fesen.opensearch.action.termvectors.TermVectorsRequestBuilder;
+import org.codelibs.fesen.opensearch.action.termvectors.TermVectorsResponse;
+import org.codelibs.fesen.opensearch.action.update.UpdateRequest;
+import org.codelibs.fesen.opensearch.action.update.UpdateRequestBuilder;
+import org.codelibs.fesen.opensearch.action.update.UpdateResponse;
+import org.codelibs.fesen.opensearch.cluster.metadata.MappingMetadata;
+import org.codelibs.fesen.opensearch.common.action.ActionFuture;
+import org.codelibs.fesen.opensearch.common.document.DocumentField;
+import org.codelibs.fesen.opensearch.common.settings.Settings;
+import org.codelibs.fesen.opensearch.common.settings.Settings.Builder;
+import org.codelibs.fesen.opensearch.common.unit.TimeValue;
+import org.codelibs.fesen.opensearch.common.xcontent.XContentType;
+import org.codelibs.fesen.opensearch.core.action.ActionListener;
+import org.codelibs.fesen.opensearch.core.action.ActionResponse;
+import org.codelibs.fesen.opensearch.core.rest.RestStatus;
+import org.codelibs.fesen.opensearch.index.query.InnerHitBuilder;
+import org.codelibs.fesen.opensearch.index.query.QueryBuilder;
+import org.codelibs.fesen.opensearch.index.query.QueryBuilders;
+import org.codelibs.fesen.opensearch.index.reindex.UpdateByQueryRequest;
+import org.codelibs.fesen.opensearch.script.Script;
+import org.codelibs.fesen.opensearch.script.ScriptType;
+import org.codelibs.fesen.opensearch.search.SearchHit;
+import org.codelibs.fesen.opensearch.search.SearchHits;
+import org.codelibs.fesen.opensearch.search.aggregations.AggregationBuilders;
+import org.codelibs.fesen.opensearch.search.aggregations.bucket.filter.FilterAggregationBuilder;
+import org.codelibs.fesen.opensearch.search.aggregations.bucket.terms.TermsAggregationBuilder;
+import org.codelibs.fesen.opensearch.search.builder.PointInTimeBuilder;
+import org.codelibs.fesen.opensearch.search.collapse.CollapseBuilder;
+import org.codelibs.fesen.opensearch.search.fetch.subphase.highlight.HighlightBuilder;
+import org.codelibs.fesen.opensearch.search.sort.SortBuilders;
+import org.codelibs.fesen.opensearch.search.sort.SortOrder;
+import org.codelibs.fesen.opensearch.threadpool.ThreadPool;
+import org.codelibs.fesen.opensearch.transport.client.AdminClient;
+import org.codelibs.fesen.opensearch.transport.client.Client;
+
+import tools.jackson.core.type.TypeReference;
+import tools.jackson.databind.ObjectMapper;
+import com.google.common.io.BaseEncoding;
+
+import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
+
+/**
+ * Client for interacting with OpenSearch search engine.
+ * Provides document indexing, searching, and administrative operations.
+ */
+public class SearchEngineClient implements Client {
+
+    /**
+     * Default constructor.
+     */
+    public SearchEngineClient() {
+        // Default constructor
+    }
+
+    private static final Logger logger = LogManager.getLogger(SearchEngineClient.class);
+
+    private static final String DOC_INDEX = "fess";
+
+    private static final String LOG_INDEX_PREFIX = "fess_log";
+
+    private static final String USER_INDEX_PREFIX = "fess_user";
+
+    private static final String CONFIG_INDEX_PREFIX = "fess_config";
+
+    /** OpenSearch client for executing operations */
+    protected Client client;
+
+    /** Path to index configuration resources */
+    protected String indexConfigPath = "fess_indices";
+
+    /** List of index configuration files to load */
+    protected List<String> indexConfigList = new ArrayList<>();
+
+    /** Map of configuration types to their respective configuration files */
+    protected Map<String, List<String>> configListMap = new HashMap<>();
+
+    /** Keep-alive of the point in time that search operations page over */
+    protected String scrollForSearch = "1m";
+
+    /** Batch size for delete operations */
+    protected int sizeForDelete = 100;
+
+    /** Keep-alive of the point in time that delete operations page over */
+    protected String scrollForDelete = "1m";
+
+    /** Batch size for update operations */
+    protected int sizeForUpdate = 100;
+
+    /** Keep-alive of the point in time that update operations page over */
+    protected String scrollForUpdate = "1m";
+
+    /** Maximum retry attempts for configuration synchronization status checks */
+    protected int maxConfigSyncStatusRetry = 10;
+
+    /** Maximum retry attempts for search engine status checks */
+    protected int maxEsStatusRetry = 60;
+
+    /** The config index whose bulk data is reloaded on startup so newly shipped jobs appear on upgraded installations. */
+    protected static final String SCHEDULED_JOB_CONFIG_INDEX = "fess_config.scheduled_job";
+
+    /** List of rewrite rules for document settings */
+    protected final List<UnaryOperator<String>> docSettingRewriteRuleList = new ArrayList<>();
+
+    /** List of rewrite rules for document mappings */
+    protected final List<UnaryOperator<String>> docMappingRewriteRuleList = new ArrayList<>();
+
+    /** Whether to use pipelines for document processing */
+    protected boolean usePipeline = false;
+
+    /**
+     * Adds an index configuration file path to be loaded.
+     *
+     * @param path path to the index configuration file
+     */
+    public void addIndexConfig(final String path) {
+        indexConfigList.add(path);
+    }
+
+    /**
+     * Adds a configuration file for a specific index.
+     *
+     * @param index the index name
+     * @param path  path to the configuration file
+     */
+    public void addConfigFile(final String index, final String path) {
+        configListMap.computeIfAbsent(index, k -> new ArrayList<>()).add(path);
+    }
+
+    /**
+     * Gets the current cluster health status.
+     *
+     * @return the cluster health status name
+     */
+    public String getStatus() {
+        return admin().cluster()
+                .prepareHealth()
+                .execute()
+                .actionGet(ComponentUtil.getFessConfig().getIndexHealthTimeout())
+                .getStatus()
+                .name();
+    }
+
+    /**
+     * Enables the use of ingest pipelines for document processing.
+     */
+    public void usePipeline() {
+        usePipeline = true;
+    }
+
+    /**
+     * Resolves a hostname to an InetAddress.
+     *
+     * @param host the hostname to resolve
+     * @return the resolved InetAddress
+     * @throws FessSystemException if hostname resolution fails
+     */
+    protected InetAddress getInetAddressByName(final String host) {
+        try {
+            return InetAddress.getByName(host);
+        } catch (final UnknownHostException e) {
+            throw new FessSystemException("Failed to resolve the hostname: " + host, e);
+        }
+    }
+
+    /**
+     * Normalises {@code fess.dictionary.path} and appends the configured dictionary prefix.
+     *
+     * <p>The index settings concatenate this value with a relative file name -- {@code fess.json}
+     * carries {@code "keywords_path": "${fess.dictionary.path}ar/protwords.txt"} -- so a value
+     * without a trailing separator produces {@code .../dictionaryar/protwords.txt} and index
+     * creation fails with {@code IOException while reading keywords_path: file not readable}.
+     * The value reaches Fess from {@code FESS_DICTIONARY_PATH} or {@code -Dfess.dictionary.path},
+     * neither of which is required to end in a separator, so it is normalised here. The trailing
+     * separator used to be added only when a dictionary prefix was configured, which is not the
+     * default; the embedded search engine hid the gap by leaving the property unset entirely.</p>
+     *
+     * @param fessConfig the configuration supplying the dictionary prefix
+     */
+    protected void resolveDictionaryPath(final FessConfig fessConfig) {
+        String dictionaryPath = System.getProperty("fess.dictionary.path", StringUtil.EMPTY);
+        if (StringUtil.isNotBlank(dictionaryPath) && !dictionaryPath.endsWith("/")) {
+            dictionaryPath = dictionaryPath + "/";
+            System.setProperty("fess.dictionary.path", dictionaryPath);
+        }
+        if (StringUtil.isNotBlank(fessConfig.getIndexDictionaryPrefix())) {
+            System.setProperty("fess.dictionary.path", dictionaryPath + fessConfig.getIndexDictionaryPrefix() + "/");
+        }
+    }
+
+    /**
+     * Initializes the search engine client and configures indices.
+     * Called automatically after dependency injection is complete.
+     */
+    @PostConstruct
+    public void open() {
+        if (logger.isDebugEnabled()) {
+            logger.debug("Initializing {}", this.getClass().getSimpleName());
+        }
+        final FessConfig fessConfig = ComponentUtil.getFessConfig();
+
+        resolveDictionaryPath(fessConfig);
+
+        String httpAddress = SystemUtil.getSearchEngineHttpAddress();
+        if (StringUtil.isBlank(httpAddress)) {
+            httpAddress = org.codelibs.fess.util.ResourceUtil.getFesenHttpUrl();
+        }
+        if (StringUtil.isBlank(httpAddress)) {
+            throw new FessSystemException("""
+                    No search engine address is configured, and Fess needs an OpenSearch server to run. \
+                    Set SEARCH_ENGINE_HTTP_URL in bin/fess.in.sh, the -Dfess.search_engine.http_address option \
+                    in bin\\fess.in.bat on Windows, or search_engine.http.url in fess_config.properties. \
+                    Run bin/fess-setup install opensearch to set one up.""");
+        }
+        client = createHttpClient(fessConfig, httpAddress);
+
+        if (StringUtil.isNotBlank(httpAddress)) {
+            System.setProperty(Constants.FESS_SEARCH_ENGINE_HTTP_ADDRESS, httpAddress);
+        }
+
+        waitForYellowStatus(fessConfig);
+
+        verifyEngineVersion();
+
+        indexConfigList.forEach(configName -> {
+            final String[] values = configName.split("/");
+            if (values.length == 2) {
+                final String configIndex = values[0];
+                final String configType = values[1];
+
+                final boolean isFessIndex = DOC_INDEX.equals(configIndex);
+                final String indexName;
+                if (isFessIndex) {
+                    indexName = setUpDocumentIndex(fessConfig, configIndex);
+                } else {
+                    if (configIndex.startsWith(CONFIG_INDEX_PREFIX)) {
+                        final String name = fessConfig.getIndexConfigIndex();
+                        indexName = configIndex.replaceFirst(Pattern.quote(CONFIG_INDEX_PREFIX), name);
+                    } else if (configIndex.startsWith(USER_INDEX_PREFIX)) {
+                        final String name = fessConfig.getIndexUserIndex();
+                        indexName = configIndex.replaceFirst(Pattern.quote(USER_INDEX_PREFIX), name);
+                    } else if (configIndex.startsWith(LOG_INDEX_PREFIX)) {
+                        final String name = fessConfig.getIndexLogIndex();
+                        indexName = configIndex.replaceFirst(Pattern.quote(LOG_INDEX_PREFIX), name);
+                    } else {
+                        throw new FessSystemException("Unknown config index: " + configIndex);
+                    }
+                    final boolean exists = existsIndex(indexName);
+                    if (!exists) {
+                        createIndex(configIndex, indexName);
+                        createAlias(configIndex, indexName);
+                    }
+                }
+
+                addMapping(configIndex, configType, indexName);
+            } else {
+                logger.warn("Invalid index config name: configName={}", configName);
+            }
+        });
+    }
+
+    /**
+     * Finds the document index behind the update alias, creating it on first boot.
+     *
+     * <p>Several instances that share index names can start at once against a cluster that has
+     * no document index yet. Each of them sees no update alias and creates its own
+     * {@code fess.<timestamp>} index. The index is therefore created together with its aliases in
+     * one request, and the update alias is marked as the write index. The search engine applies
+     * index creations one at a time and refuses a second write index for the same alias, so only
+     * the first request succeeds. Every other instance adopts the index that request created.</p>
+     *
+     * @param fessConfig  the Fess configuration
+     * @param configIndex the document index configuration name
+     * @return the concrete document index name
+     */
+    protected String setUpDocumentIndex(final FessConfig fessConfig, final String configIndex) {
+        final String updateAlias = fessConfig.getIndexDocumentUpdateIndex();
+        if (existsIndex(updateAlias)) {
+            return getDocumentIndexName(fessConfig, configIndex);
+        }
+        final String newIndexName = generateNewIndexName(configIndex);
+        if (createIndex(configIndex, newIndexName, fessConfig.getIndexNumberOfShards(), fessConfig.getIndexAutoExpandReplicas(), true,
+                getDocumentIndexAliases(configIndex))) {
+            return newIndexName;
+        }
+        if (existsIndex(updateAlias)) {
+            final String indexName = getDocumentIndexName(fessConfig, configIndex);
+            logger.info("Using the document index created by another process: alias={}, index={}", updateAlias, indexName);
+            return indexName;
+        }
+        return newIndexName;
+    }
+
+    /**
+     * Returns the single index behind the document update alias.
+     *
+     * @param fessConfig  the Fess configuration
+     * @param configIndex the document index configuration name, returned when the alias does not point to exactly one index
+     * @return the concrete document index name
+     */
+    protected String getDocumentIndexName(final FessConfig fessConfig, final String configIndex) {
+        final String updateAlias = fessConfig.getIndexDocumentUpdateIndex();
+        client.admin()
+                .cluster()
+                .prepareHealth(updateAlias)
+                .setWaitForYellowStatus()
+                .execute()
+                .actionGet(fessConfig.getIndexIndicesTimeout());
+        final GetIndexResponse response =
+                client.admin().indices().prepareGetIndex().addIndices(updateAlias).execute().actionGet(fessConfig.getIndexIndicesTimeout());
+        final String[] indices = response.indices();
+        if (indices.length == 1) {
+            return indices[0];
+        }
+        logger.warn("The document update alias does not point to exactly one index: alias={}, indices={}", updateAlias,
+                Arrays.toString(indices));
+        return configIndex;
+    }
+
+    /**
+     * Creates an HTTP client for connecting to the search engine.
+     *
+     * @param fessConfig the Fess configuration
+     * @param host       the search engine host address
+     * @return the configured HTTP client
+     */
+    protected Client createHttpClient(final FessConfig fessConfig, final String host) {
+        final String[] hosts =
+                split(host, ",").get(stream -> stream.map(String::trim).filter(StringUtil::isNotEmpty).toArray(n -> new String[n]));
+        final Builder builder = Settings.builder()
+                .putList("http.hosts", hosts)
+                .put("processors", fessConfig.availableProcessors())
+                .put("http.heartbeat_interval", fessConfig.getFesenHeartbeatInterval());
+        final String username = fessConfig.getFesenUsername();
+        final String password = fessConfig.getFesenPassword();
+        if (StringUtil.isNotBlank(username) && StringUtil.isNotBlank(password)) {
+            builder.put(Constants.FESEN_USERNAME, username);
+            builder.put(Constants.FESEN_PASSWORD, password);
+        }
+        final String authorities = fessConfig.getFesenHttpSslCertificateAuthorities();
+        if (StringUtil.isNotBlank(authorities)) {
+            builder.put("http.ssl.certificate_authorities", authorities);
+        }
+        return new HttpClient(builder.build(), null);
+    }
+
+    /**
+     * Checks if an index exists in the search engine.
+     *
+     * @param indexName the name of the index to check
+     * @return true if the index exists, false otherwise
+     */
+    public boolean existsIndex(final String indexName) {
+        final FessConfig fessConfig = ComponentUtil.getFessConfig();
+        boolean exists = false;
+        try {
+            final IndicesExistsResponse response =
+                    client.admin().indices().prepareExists(indexName).execute().actionGet(fessConfig.getIndexSearchTimeout());
+            exists = response.isExists();
+        } catch (final Exception e) {
+            logger.debug("Failed to check index status: indexName={}", indexName, e);
+        }
+        return exists;
+    }
+
+    /**
+     * Gets the document count of an index.
+     *
+     * @param indexName the name of the index
+     * @return the number of documents in the index, or -1 if the count could not be retrieved
+     */
+    public long getDocumentCount(final String indexName) {
+        final FessConfig fessConfig = ComponentUtil.getFessConfig();
+        try {
+            client.admin().indices().prepareRefresh(indexName).execute().actionGet(fessConfig.getIndexIndicesTimeout());
+            try (CurlResponse response = ComponentUtil.getCurlHelper().get("/" + indexName + "/_count").execute()) {
+                if (response.getHttpStatusCode() == 200) {
+                    final Map<String, Object> contentMap = response.getContent(SearchEngineCurl.jsonParser());
+                    final Object count = contentMap.get("count");
+                    if (count instanceof Number) {
+                        return ((Number) count).longValue();
+                    }
+                }
+            }
+        } catch (final Exception e) {
+            logger.debug("Failed to get document count: indexName={}", indexName, e);
+        }
+        return -1;
+    }
+
+    /**
+     * Gets the number of aliases attached to the specified index.
+     *
+     * @param indexName the name of the index
+     * @return the number of aliases, or 0 if none found or an error occurred
+     */
+    public int getAliasCount(final String indexName) {
+        try (CurlResponse response =
+                ComponentUtil.getCurlHelper().get("/_cat/aliases").param("format", "json").param("h", "alias,index").execute()) {
+            if (response.getHttpStatusCode() == 200) {
+                final String content = response.getContentAsString();
+                final ObjectMapper mapper = new ObjectMapper();
+                final List<Map<String, String>> aliases = mapper.readValue(content, new TypeReference<List<Map<String, String>>>() {
+                });
+                int count = 0;
+                for (final Map<String, String> entry : aliases) {
+                    if (indexName.equals(entry.get("index"))) {
+                        count++;
+                    }
+                }
+                return count;
+            }
+        } catch (final Exception e) {
+            logger.debug("Failed to check aliases: indexName={}", indexName, e);
+        }
+        return 0;
+    }
+
+    /**
+     * Copies documents from one index to another with optional transformation.
+     *
+     * @param fromIndex        the source index name
+     * @param toIndex          the destination index name
+     * @param waitForCompletion whether to wait for the operation to complete
+     * @return true if the copy operation was successful, false otherwise
+     */
+    public boolean copyDocIndex(final String fromIndex, final String toIndex, final boolean waitForCompletion) {
+        final FessConfig fessConfig = ComponentUtil.getFessConfig();
+        final String source = fessConfig.getIndexReindexBody()//
+                .replace("__SOURCE_INDEX__", fromIndex)//
+                .replace("__SIZE__", fessConfig.getIndexReindexSize())//
+                .replace("__DEST_INDEX__", toIndex)//
+                .replace("__SCRIPT_SOURCE__", ComponentUtil.getLanguageHelper().getReindexScriptSource());
+        return reindex(fromIndex, toIndex, source, waitForCompletion);
+    }
+
+    /**
+     * Reindexes documents from one index to another.
+     *
+     * @param fromIndex        the source index name
+     * @param toIndex          the destination index name
+     * @param waitForCompletion whether to wait for the operation to complete
+     * @return true if the reindex operation was successful, false otherwise
+     */
+    public boolean reindex(final String fromIndex, final String toIndex, final boolean waitForCompletion) {
+        final String template = """
+                {"source":{"index":"__SOURCE_INDEX__","size":__SIZE__},"dest":{"index":"__DEST_INDEX__"}}
+                """;
+        final FessConfig fessConfig = ComponentUtil.getFessConfig();
+        final String source = template //
+                .replace("__SOURCE_INDEX__", fromIndex)//
+                .replace("__SIZE__", fessConfig.getIndexReindexSize())//
+                .replace("__DEST_INDEX__", toIndex);
+        return reindex(fromIndex, toIndex, source, waitForCompletion);
+    }
+
+    /**
+     * Performs a reindex operation with custom source configuration.
+     *
+     * @param fromIndex        the source index name
+     * @param toIndex          the destination index name
+     * @param source           the reindex configuration JSON
+     * @param waitForCompletion whether to wait for the operation to complete
+     * @return true if the reindex operation was successful, false otherwise
+     */
+    protected boolean reindex(final String fromIndex, final String toIndex, final String source, final boolean waitForCompletion) {
+        final FessConfig fessConfig = ComponentUtil.getFessConfig();
+        final String refresh = StringUtil.isNotBlank(fessConfig.getIndexReindexRefresh()) ? fessConfig.getIndexReindexRefresh() : null;
+        final String requestsPerSecond = getReindexRequestsPerSecound(fessConfig);
+        final String scroll = StringUtil.isNotBlank(fessConfig.getIndexReindexScroll()) ? fessConfig.getIndexReindexScroll() : null;
+        final String maxDocs = StringUtil.isNotBlank(fessConfig.getIndexReindexMaxDocs()) ? fessConfig.getIndexReindexMaxDocs() : null;
+        try (CurlResponse response = ComponentUtil.getCurlHelper()
+                .post("/_reindex")
+                .param("refresh", refresh)
+                .param("requests_per_second", requestsPerSecond)
+                .param("scroll", scroll)
+                .param("max_docs", maxDocs)
+                .param("wait_for_completion", Boolean.toString(waitForCompletion))
+                .body(source)
+                .execute()) {
+            if (response.getHttpStatusCode() == 200) {
+                return true;
+            }
+            logger.warn("Failed to reindex: fromIndex={}, toIndex={}, response={}", fromIndex, toIndex, response.getContentAsString());
+        } catch (final IOException e) {
+            logger.warn("Failed to reindex from {} to {}", fromIndex, toIndex, e);
+        }
+        return false;
+    }
+
+    /**
+     * Calculates the requests per second setting for reindex operations.
+     *
+     * @param fessConfig the Fess configuration
+     * @return the requests per second value, or null for no limit
+     */
+    protected String getReindexRequestsPerSecound(final FessConfig fessConfig) {
+        if (StringUtil.isBlank(fessConfig.getIndexReindexRequestsPerSecond())) {
+            return null;
+        }
+        final String value = fessConfig.getIndexReindexRequestsPerSecond();
+        if ("adaptive".equalsIgnoreCase(value)) {
+            if (fessConfig.availableProcessors() >= 4) {
+                return null;
+            }
+            final String requestsPerSecond = String.valueOf(fessConfig.getIndexReindexSizeAsInteger() * fessConfig.availableProcessors());
+            logger.info("Set requests_per_second: value={}", requestsPerSecond);
+            return requestsPerSecond;
+        }
+        return value;
+    }
+
+    /**
+     * Creates a new index with default settings.
+     *
+     * @param index     the index configuration name
+     * @param indexName the actual index name to create
+     * @return true if the index was created successfully, false otherwise
+     */
+    public boolean createIndex(final String index, final String indexName) {
+        final FessConfig fessConfig = ComponentUtil.getFessConfig();
+        return createIndex(index, indexName, fessConfig.getIndexNumberOfShards(), fessConfig.getIndexAutoExpandReplicas(), true);
+    }
+
+    /**
+     * Creates a new index with specified settings.
+     *
+     * @param index              the index configuration name
+     * @param indexName          the actual index name to create
+     * @param numberOfShards     the number of primary shards
+     * @param autoExpandReplicas the auto expand replicas setting
+     * @param uploadConfig       whether to upload configuration files
+     * @return true if the index was created successfully, false otherwise
+     */
+    public boolean createIndex(final String index, final String indexName, final String numberOfShards, final String autoExpandReplicas,
+            final boolean uploadConfig) {
+        return createIndex(index, indexName, numberOfShards, autoExpandReplicas, uploadConfig, Collections.emptyMap());
+    }
+
+    /**
+     * Creates a new index with specified settings and the given aliases in a single request.
+     *
+     * @param index              the index configuration name
+     * @param indexName          the actual index name to create
+     * @param numberOfShards     the number of primary shards
+     * @param autoExpandReplicas the auto expand replicas setting
+     * @param uploadConfig       whether to upload configuration files
+     * @param aliases            the aliases to create with the index, keyed by alias name; empty for none
+     * @return true if the index was created successfully, false otherwise
+     */
+    protected boolean createIndex(final String index, final String indexName, final String numberOfShards, final String autoExpandReplicas,
+            final boolean uploadConfig, final Map<String, Object> aliases) {
+        final FessConfig fessConfig = ComponentUtil.getFessConfig();
+
+        final String fesenType = fessConfig.getFesenType();
+        if (uploadConfig) {
+            switch (fesenType) {
+            case Constants.FESEN_TYPE_CLOUD:
+            case Constants.FESEN_TYPE_AWS:
+                // nothing
+                break;
+            default:
+                waitForConfigSyncStatus();
+                sendConfigFiles(index);
+                break;
+            }
+        }
+
+        final String indexConfigFile = getResourcePath(indexConfigPath, fesenType, "/" + index + ".json");
+        try {
+            final String source = readIndexSetting(index, fesenType, indexConfigFile, numberOfShards, autoExpandReplicas);
+            final CreateIndexRequestBuilder builder =
+                    client.admin().indices().prepareCreate(indexName).setSource(source, XContentType.JSON);
+            if (!aliases.isEmpty()) {
+                builder.setAliases(aliases);
+            }
+            final CreateIndexResponse indexResponse = builder.execute().actionGet(fessConfig.getIndexIndicesTimeout());
+            if (indexResponse.isAcknowledged()) {
+                logger.info("Created index: indexName={}", indexName);
+                return true;
+            }
+            if (logger.isDebugEnabled()) {
+                logger.debug("Failed to create index: indexName={}", indexName);
+            }
+        } catch (final Exception e) {
+            if (isIndexCreatedByAnotherProcess(e)) {
+                logger.info("Skipped creating index because another process created it first: indexName={}, reason={}", indexName,
+                        e.getMessage());
+            } else if (isMissingKnnPluginError(e)) {
+                logger.warn("""
+                        Failed to create index: index={}, path={}. This looks like the OpenSearch cluster is missing the \
+                        opensearch-knn plugin -- every shipped index now declares "index.knn": true and a \
+                        "knn_vector" field unconditionally. Install opensearch-knn on every node and restart; Fess \
+                        cannot start against this cluster otherwise, and the failure this triggers next (loading this \
+                        index's mapping) will not repeat this diagnosis.""", index, indexConfigFile, e);
+            } else {
+                logger.warn("Failed to create index: index={}, path={}", index, indexConfigFile, e);
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Detects whether an index creation failed only because another process got there first.
+     *
+     * <p>That is either {@code resource_already_exists_exception} for the same index name, or
+     * {@code illegal_state_exception} for an alias that would get a second write index, which is
+     * how a concurrent first boot of the document index is refused (see
+     * {@link #setUpDocumentIndex(FessConfig, String)}). The HTTP client keeps the error type only in
+     * the exception message.</p>
+     *
+     * @param t the exception to inspect, including its cause chain
+     * @return {@code true} when the index or its write alias already exists
+     */
+    protected boolean isIndexCreatedByAnotherProcess(final Throwable t) {
+        for (Throwable cause = t; cause != null; cause = cause.getCause()) {
+            final String message = cause.getMessage();
+            if (message != null
+                    && (message.contains("resource_already_exists_exception") || message.contains("has more than one write index"))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Detects whether an exception thrown while creating an index (or one of its causes) is
+     * OpenSearch rejecting a k-NN construct because the {@code opensearch-knn} plugin is not
+     * installed on the cluster, rather than some other index-creation failure.
+     *
+     * <p>{@link #createIndex(String, String, String, String, boolean)} only logs this at WARN and
+     * returns {@code false}; the caller ({@code open()}) does not check that return value before
+     * proceeding to {@link #createAlias(String, String)} and then {@link #addMapping(String, String,
+     * String, boolean)}, whose {@code prepareGetMappings} call throws uncaught for a nonexistent
+     * index -- so this diagnostic is the only place in the resulting stack trace that names the
+     * actual, fixable cause; everything after it just reports the index does not exist.</p>
+     *
+     * @param t the exception to inspect, including its cause chain
+     * @return {@code true} when the failure matches one of OpenSearch's k-NN-plugin-missing error
+     *         shapes ({@code unknown setting [index.knn]}, {@code No handler for type [knn_vector]})
+     */
+    protected boolean isMissingKnnPluginError(final Throwable t) {
+        for (Throwable cause = t; cause != null; cause = cause.getCause()) {
+            final String message = cause.getMessage();
+            if (message != null
+                    && (message.contains("unknown setting [index.knn]") || message.contains("No handler for type [knn_vector]"))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Deletes an index from the search engine.
+     *
+     * @param indexName the name of the index to delete
+     * @return true if the index was deleted successfully, false otherwise
+     */
+    public boolean deleteIndex(final String indexName) {
+        final FessConfig fessConfig = ComponentUtil.getFessConfig();
+        try {
+            final AcknowledgedResponse response =
+                    client.admin().indices().prepareDelete(indexName).execute().actionGet(fessConfig.getIndexIndicesTimeout());
+            return response.isAcknowledged();
+        } catch (final Exception e) {
+            logger.warn("Failed to delete index: indexName={}", indexName, e);
+        }
+        return false;
+    }
+
+    /**
+     * Rebuilds configuration indices with the latest mappings using atomic alias switching.
+     * Only indices matching the specified target prefixes are rebuilt.
+     * For each index: creates a backup, reindexes data, creates a new index, reindexes from backup,
+     * atomically switches aliases, then cleans up old and backup indices.
+     *
+     * @param loadBulkData    whether to load default bulk data after rebuilding (using OpType.CREATE to skip existing documents)
+     * @param targetPrefixes  the set of index prefixes to rebuild (e.g., "fess_config", "fess_user", "fess_log")
+     * @return true if all targeted indices were rebuilt successfully, false if any index rebuild failed
+     */
+    public boolean reindexConfigIndices(final boolean loadBulkData, final Set<String> targetPrefixes) {
+        final FessConfig fessConfig = ComponentUtil.getFessConfig();
+        final String timestamp = new SimpleDateFormat(Constants.DOCUMENT_INDEX_SUFFIX_PATTERN).format(new Date());
+        boolean success = true;
+
+        for (final String configName : indexConfigList) {
+            final String[] values = configName.split("/");
+            if (values.length != 2) {
+                continue;
+            }
+
+            final String configIndex = values[0];
+            final String configType = values[1];
+
+            if (DOC_INDEX.equals(configIndex)) {
+                continue;
+            }
+
+            final String indexName;
+            if (configIndex.startsWith(CONFIG_INDEX_PREFIX)) {
+                if (!targetPrefixes.contains(CONFIG_INDEX_PREFIX)) {
+                    continue;
+                }
+                indexName = configIndex.replaceFirst(Pattern.quote(CONFIG_INDEX_PREFIX), fessConfig.getIndexConfigIndex());
+            } else if (configIndex.startsWith(USER_INDEX_PREFIX)) {
+                if (!targetPrefixes.contains(USER_INDEX_PREFIX)) {
+                    continue;
+                }
+                indexName = configIndex.replaceFirst(Pattern.quote(USER_INDEX_PREFIX), fessConfig.getIndexUserIndex());
+            } else if (configIndex.startsWith(LOG_INDEX_PREFIX)) {
+                if (!targetPrefixes.contains(LOG_INDEX_PREFIX)) {
+                    continue;
+                }
+                indexName = configIndex.replaceFirst(Pattern.quote(LOG_INDEX_PREFIX), fessConfig.getIndexLogIndex());
+            } else {
+                logger.warn("[Rebuild] Unknown config index: {}", configIndex);
+                success = false;
+                continue;
+            }
+
+            if (!existsIndex(indexName)) {
+                logger.info("[Rebuild] Creating new index: {}", indexName);
+                if (!createIndex(configIndex, indexName)) {
+                    logger.warn("[Rebuild] Failed to create index: {}", indexName);
+                    success = false;
+                    continue;
+                }
+                try {
+                    addMapping(configIndex, configType, indexName, loadBulkData);
+                    createAlias(configIndex, indexName);
+                } catch (final Exception e) {
+                    logger.warn("[Rebuild] Failed to set up index: {}", indexName, e);
+                    success = false;
+                }
+                continue;
+            }
+
+            final String backupIndex = indexName + ".backup." + timestamp;
+            logger.info("[Rebuild] Starting rebuild for {}", indexName);
+
+            try {
+                final long sourceCount = getDocumentCount(indexName);
+
+                // 1. Create backup index with new mappings
+                if (!createIndex(configIndex, backupIndex)) {
+                    logger.warn("[Rebuild] Failed to create backup index: {}", backupIndex);
+                    success = false;
+                    continue;
+                }
+                addMapping(configIndex, configType, backupIndex, false);
+
+                // 2. Reindex current -> backup and verify document count
+                if (!reindex(indexName, backupIndex, true)) {
+                    logger.warn("[Rebuild] Failed to reindex from {} to {}", indexName, backupIndex);
+                    deleteIndex(backupIndex);
+                    success = false;
+                    continue;
+                }
+                if (sourceCount >= 0) {
+                    final long backupCount = getDocumentCount(backupIndex);
+                    if (backupCount != sourceCount) {
+                        logger.warn("[Rebuild] Document count mismatch after reindex: source={}, backup={} for {}", sourceCount,
+                                backupCount, indexName);
+                        deleteIndex(backupIndex);
+                        success = false;
+                        continue;
+                    }
+                }
+
+                // 3. Delete old index and recreate with the same name (Bhv layer caches concrete index names)
+                deleteIndex(indexName);
+                if (!createIndex(configIndex, indexName)) {
+                    logger.warn("[Rebuild] Failed to recreate index: {}. Keeping backup: {}", indexName, backupIndex);
+                    success = false;
+                    continue;
+                }
+                addMapping(configIndex, configType, indexName, false);
+
+                // 4. Reindex backup -> recreated index and verify document count
+                if (!reindex(backupIndex, indexName, true)) {
+                    logger.warn("[Rebuild] Failed to reindex from {} to {}. Cleaning up.", backupIndex, indexName);
+                    deleteIndex(backupIndex);
+                    success = false;
+                    continue;
+                }
+                if (sourceCount >= 0) {
+                    final long rebuiltCount = getDocumentCount(indexName);
+                    if (rebuiltCount != sourceCount) {
+                        logger.warn("[Rebuild] Document count mismatch after rebuild: expected={}, actual={} for {}", sourceCount,
+                                rebuiltCount, indexName);
+                        deleteIndex(backupIndex);
+                        success = false;
+                        continue;
+                    }
+                }
+
+                // 5. Optionally load bulk data with CREATE mode
+                if (loadBulkData) {
+                    final String dataPath =
+                            getResourcePath(indexConfigPath, fessConfig.getFesenType(), "/" + configIndex + "/" + configType + ".bulk");
+                    if (ResourceUtil.isExist(dataPath)) {
+                        insertBulkData(fessConfig, indexName, dataPath, true);
+                    }
+                    split(fessConfig.getAppExtensionNames(), ",").of(stream -> stream.filter(StringUtil::isNotBlank).forEach(name -> {
+                        final String bulkPath = getResourcePath(indexConfigPath, fessConfig.getFesenType(),
+                                "/" + configIndex + "/" + configType + "_" + name + ".bulk");
+                        if (ResourceUtil.isExist(bulkPath)) {
+                            insertBulkData(fessConfig, indexName, bulkPath, true);
+                        }
+                    }));
+                }
+
+                // 6. Recreate aliases on the rebuilt index
+                createAlias(configIndex, indexName);
+
+                // 7. Delete backup
+                deleteIndex(backupIndex);
+
+                logger.info("[Rebuild] Completed rebuild for {}", indexName);
+            } catch (final Exception e) {
+                logger.warn("[Rebuild] Failed to rebuild index: {}", indexName, e);
+                if (existsIndex(backupIndex)) {
+                    logger.info("[Rebuild] Backup index {} remains for recovery", backupIndex);
+                }
+                success = false;
+            }
+        }
+        return success;
+    }
+
+    /**
+     * Atomically switches aliases from one index to another.
+     * Reads alias configuration files, removes aliases from the old index, and adds them to the new index
+     * in a single atomic operation.
+     *
+     * @param configIndex  the index configuration name
+     * @param oldIndexName the current index name to remove aliases from
+     * @param newIndexName the new index name to add aliases to
+     * @return true if all aliases were switched successfully, false otherwise
+     */
+    protected boolean switchAliases(final String configIndex, final String oldIndexName, final String newIndexName) {
+        final FessConfig fessConfig = ComponentUtil.getFessConfig();
+        final String aliasConfigDirPath = getResourcePath(indexConfigPath, fessConfig.getFesenType(), "/" + configIndex + "/alias");
+        try {
+            final File aliasConfigDir = ResourceUtil.getResourceAsFile(aliasConfigDirPath);
+            if (aliasConfigDir.isDirectory()) {
+                final IndicesAliasesRequestBuilder builder = client.admin().indices().prepareAliases();
+                stream(aliasConfigDir.listFiles((dir, name) -> name.endsWith(".json"))).of(stream -> stream.forEach(f -> {
+                    String aliasName = f.getName().replaceFirst(".json$", "");
+                    if (configIndex.startsWith(CONFIG_INDEX_PREFIX)) {
+                        final String name = fessConfig.getIndexConfigIndex();
+                        if ("fess_basic_config".equals(aliasName) && !CONFIG_INDEX_PREFIX.equals(name)) {
+                            aliasName = aliasName.replaceFirst("fess_basic_config", "basic_" + name);
+                        } else {
+                            aliasName = aliasName.replaceFirst(Pattern.quote(CONFIG_INDEX_PREFIX), name);
+                        }
+                    } else if (configIndex.startsWith(USER_INDEX_PREFIX)) {
+                        final String name = fessConfig.getIndexUserIndex();
+                        aliasName = aliasName.replaceFirst(Pattern.quote(USER_INDEX_PREFIX), name);
+                    } else if (configIndex.startsWith(LOG_INDEX_PREFIX)) {
+                        final String name = fessConfig.getIndexLogIndex();
+                        aliasName = aliasName.replaceFirst(Pattern.quote(LOG_INDEX_PREFIX), name);
+                    }
+                    String source = FileUtil.readUTF8(f);
+                    if ("{}".equals(source.trim())) {
+                        source = null;
+                    }
+                    logger.info("[Rebuild] Alias action: remove alias={} from index={}, add alias={} to index={}", aliasName, oldIndexName,
+                            aliasName, newIndexName);
+                    builder.removeAlias(oldIndexName, aliasName);
+                    if (source != null) {
+                        builder.addAlias(newIndexName, aliasName, source);
+                    } else {
+                        builder.addAlias(newIndexName, aliasName);
+                    }
+                }));
+                final AcknowledgedResponse response = builder.execute().actionGet(fessConfig.getIndexIndicesTimeout());
+                if (response.isAcknowledged()) {
+                    logger.info("[Rebuild] Switched aliases from {} to {}", oldIndexName, newIndexName);
+                    return true;
+                }
+                logger.warn("[Rebuild] Alias switch not acknowledged from {} to {}", oldIndexName, newIndexName);
+            }
+        } catch (final ResourceNotFoundRuntimeException e) {
+            // No alias configuration found - create aliases normally (does NOT remove old aliases)
+            logger.warn("[Rebuild] No alias config found for {}, falling back to createAlias (old aliases NOT removed)", configIndex);
+            createAlias(configIndex, newIndexName);
+            return true;
+        } catch (final Exception e) {
+            logger.warn("[Rebuild] Failed to switch aliases from {} to {}", oldIndexName, newIndexName, e);
+        }
+        return false;
+    }
+
+    /**
+     * Reads and processes index settings from configuration file.
+     *
+     * <p>The document settings rewrite rules are applied to the document index only, mirroring
+     * {@link #addMapping(String, String, String, boolean)}'s guard for the mapping rules: they
+     * anchor on document-index constructs, so running them over the other index config files
+     * only produces anchor-miss warnings naming a file unrelated to the index being created.</p>
+     *
+     * @param index              the index configuration name
+     * @param fesenType          the search engine type
+     * @param indexConfigFile    the path to the index configuration file
+     * @param numberOfShards     the number of primary shards
+     * @param autoExpandReplicas the auto expand replicas setting
+     * @return the processed index settings JSON
+     */
+    protected String readIndexSetting(final String index, final String fesenType, final String indexConfigFile, final String numberOfShards,
+            final String autoExpandReplicas) {
+        String source = substitutePlaceholders(FileUtil.readUTF8(indexConfigFile), numberOfShards, autoExpandReplicas);
+        if (DOC_INDEX.equals(index)) {
+            for (final UnaryOperator<String> rule : docSettingRewriteRuleList) {
+                source = rule.apply(source);
+            }
+        }
+        return source;
+    }
+
+    /**
+     * Substitutes {@code ${fess.*}} placeholders in an index settings or mapping definition.
+     *
+     * <p>The {@code content_chunker.embedding.dimension}/{@code .search.knn.{method,engine,
+     * space_type}} placeholders delegate to {@link ChunkVectorHelper#getKnnDimension()}/
+     * {@link ChunkVectorHelper#getKnnMethod()}/{@link ChunkVectorHelper#getKnnEngine()}/
+     * {@link ChunkVectorHelper#getKnnSpaceType()} rather than reading the underlying system
+     * properties directly. This matters for two reasons: first, an invalid or present-but-empty
+     * value (e.g. an operator clearing a property rather than deleting it -- {@code
+     * FessProp#getSystemProperty}'s default only fires when the key is <em>absent</em>) is rejected
+     * and replaced with the documented default instead of being spliced into the shipped mapping
+     * unvalidated, which would otherwise 400 {@code preparePutMapping} and leave the index with no
+     * proper mapping at all; second, this method and {@link ChunkVectorHelper#getKnnEngine()}/
+     * {@link ChunkVectorHelper#getKnnSpaceType()}'s query-time score-scale conversion then read the
+     * exact same validated values instead of duplicating the literal defaults, so the two sides
+     * cannot silently diverge.</p>
+     *
+     * <p>{@code content_chunker.search.knn.engine}/{@code .space_type} are read again at query time
+     * by those same {@code ChunkVectorHelper} getters, so the {@code content_chunk_vector} mapping's
+     * ANN {@code method} block (baked in here, at index-creation time) and
+     * {@code SemanticChunkSearcher}'s score-scale conversion agree for any index created under the
+     * configuration active right now -- but {@code engine}/{@code space_type} are live-reloadable
+     * while the mapping is not, so an index created under an older configuration keeps its original
+     * values until it is recreated, even after the config changes underneath it.
+     * {@code content_chunker.search.knn.method}, by contrast, has no query-time reader -- it only
+     * feeds the {@code doc.json} placeholder, so {@link ChunkVectorHelper#getKnnMethod()} exists
+     * solely to validate it.</p>
+     *
+     * @param source             the raw JSON read from the index definition file
+     * @param numberOfShards     the number of primary shards
+     * @param autoExpandReplicas the auto expand replicas setting
+     * @return the JSON with all placeholders replaced
+     */
+    protected String substitutePlaceholders(final String source, final String numberOfShards, final String autoExpandReplicas) {
+        final FessConfig fessConfig = ComponentUtil.getFessConfig();
+        final ChunkVectorHelper chunkVectorHelper = ComponentUtil.getComponent(ChunkVectorHelper.class);
+        String dictionaryPath = System.getProperty("fess.dictionary.path", StringUtil.EMPTY);
+        if (StringUtil.isNotBlank(dictionaryPath) && !dictionaryPath.endsWith("/")) {
+            dictionaryPath = dictionaryPath + "/";
+        }
+        // dimension/method/engine/space_type are each validated by ChunkVectorHelper before this
+        // splices them in, so the replacement can never carry regex metacharacters ($, \) that
+        // would need Matcher.quoteReplacement -- a validated token is always either a bare positive
+        // integer or a member of a small fixed allow-set.
+        return source.replaceAll(Pattern.quote("${fess.dictionary.path}"), dictionaryPath)//
+                .replaceAll(Pattern.quote("${fess.index.codec}"), fessConfig.getIndexCodec())//
+                .replaceAll(Pattern.quote("${fess.index.number_of_shards}"), numberOfShards)//
+                .replaceAll(Pattern.quote("${fess.index.auto_expand_replicas}"), autoExpandReplicas)//
+                .replaceAll(Pattern.quote("${fess.content_chunker.embedding.dimension}"), chunkVectorHelper.getKnnDimension())//
+                .replaceAll(Pattern.quote("${fess.content_chunker.search.knn.method}"), chunkVectorHelper.getKnnMethod())//
+                .replaceAll(Pattern.quote("${fess.content_chunker.search.knn.engine}"), chunkVectorHelper.getKnnEngine())//
+                .replaceAll(Pattern.quote("${fess.content_chunker.search.knn.space_type}"), chunkVectorHelper.getKnnSpaceType());
+    }
+
+    /**
+     * Adds a rewrite rule for document settings.
+     *
+     * @param rule the rewrite rule to apply to document settings
+     */
+    public void addDocumentSettingRewriteRule(final UnaryOperator<String> rule) {
+        docSettingRewriteRuleList.add(rule);
+    }
+
+    /**
+     * Gets the resource path for configuration files, checking type-specific variants first.
+     *
+     * @param basePath the base path for resources
+     * @param type     the search engine type
+     * @param path     the relative path to the resource
+     * @return the full resource path
+     */
+    protected String getResourcePath(final String basePath, final String type, final String path) {
+        final String target = basePath + "/_" + type + path;
+        if (ResourceUtil.getResourceNoException(target) != null) {
+            return target;
+        }
+        return basePath + path;
+    }
+
+    /**
+     * Adds field mappings to an index.
+     *
+     * @param index     the index configuration name
+     * @param docType   the document type
+     * @param indexName the actual index name
+     */
+    public void addMapping(final String index, final String docType, final String indexName) {
+        addMapping(index, docType, indexName, true);
+    }
+
+    /**
+     * Adds field mappings and optionally loads bulk data for an index.
+     *
+     * @param index        the index configuration name
+     * @param docType      the document type name
+     * @param indexName    the actual index name
+     * @param loadBulkData whether to load bulk data after applying mappings
+     */
+    public void addMapping(final String index, final String docType, final String indexName, final boolean loadBulkData) {
+        final FessConfig fessConfig = ComponentUtil.getFessConfig();
+
+        final GetMappingsResponse getMappingsResponse =
+                client.admin().indices().prepareGetMappings(indexName).execute().actionGet(fessConfig.getIndexIndicesTimeout());
+        final Map<String, MappingMetadata> indexMappings = getMappingsResponse.mappings();
+        if (indexMappings == null || !indexMappings.containsKey("properties")) {
+            String source = null;
+            final String mappingFile = getResourcePath(indexConfigPath, fessConfig.getFesenType(), "/" + index + "/" + docType + ".json");
+            try {
+                source = substitutePlaceholders(FileUtil.readUTF8(mappingFile), fessConfig.getIndexNumberOfShards(),
+                        fessConfig.getIndexAutoExpandReplicas());
+                if (DOC_INDEX.equals(index)) {
+                    for (final UnaryOperator<String> rule : docMappingRewriteRuleList) {
+                        source = rule.apply(source);
+                    }
+                }
+            } catch (final Exception e) {
+                logger.warn("{} is not found.", mappingFile, e);
+            }
+            try {
+                final AcknowledgedResponse putMappingResponse = client.admin()
+                        .indices()
+                        .preparePutMapping(indexName)
+                        .setSource(source, XContentType.JSON)
+                        .execute()
+                        .actionGet(fessConfig.getIndexIndicesTimeout());
+                if (putMappingResponse.isAcknowledged()) {
+                    logger.info("Created {}/{} mapping.", indexName, docType);
+                } else {
+                    logger.warn("Failed to create {}/{} mapping.", indexName, docType);
+                }
+
+                if (loadBulkData) {
+                    final String dataPath =
+                            getResourcePath(indexConfigPath, fessConfig.getFesenType(), "/" + index + "/" + docType + ".bulk");
+                    if (ResourceUtil.isExist(dataPath)) {
+                        insertBulkData(fessConfig, indexName, dataPath);
+                    }
+                    split(fessConfig.getAppExtensionNames(), ",").of(stream -> stream.filter(StringUtil::isNotBlank).forEach(name -> {
+                        final String bulkPath = getResourcePath(indexConfigPath, fessConfig.getFesenType(),
+                                "/" + index + "/" + docType + "_" + name + ".bulk");
+                        if (ResourceUtil.isExist(bulkPath)) {
+                            insertBulkData(fessConfig, indexName, bulkPath);
+                        }
+                    }));
+                }
+            } catch (final Exception e) {
+                logger.warn("Failed to create {}/{} mapping.", indexName, docType, e);
+            }
+        } else {
+            if (logger.isDebugEnabled()) {
+                logger.debug("{}/{} mapping exists.", indexName, docType);
+            }
+            if (loadBulkData && isStartupBulkReloadTarget(index) && isWebappProcess()) {
+                final String dataPath = getResourcePath(indexConfigPath, fessConfig.getFesenType(), "/" + index + "/" + docType + ".bulk");
+                if (ResourceUtil.isExist(dataPath)) {
+                    insertBulkData(fessConfig, indexName, dataPath, true);
+                }
+            }
+        }
+    }
+
+    /**
+     * Determines whether an already-mapped index should have its bulk data reloaded on startup.
+     *
+     * <p>Bulk data normally loads only when an index is created, so an upgraded installation never
+     * receives documents added by a new release. Reloading is limited to the scheduled job index and
+     * uses create-only semantics, so user-modified rows are preserved and user-deleted rows in other
+     * config indices are not resurrected.</p>
+     *
+     * @param index the index configuration name
+     * @return {@code true} when the index's bulk data should be reloaded
+     */
+    protected boolean isStartupBulkReloadTarget(final String index) {
+        return SCHEDULED_JOB_CONFIG_INDEX.equals(index);
+    }
+
+    /**
+     * Determines whether this JVM is the main webapp process, as opposed to one of the short-lived
+     * child processes ({@code Crawler}, {@code SuggestCreator}, {@code ChunkVectorIndexer},
+     * {@code ThumbnailGenerator}) that also boot {@code app.xml} -- and therefore also run this
+     * {@code @PostConstruct} -- to run a single scheduled job and exit.
+     *
+     * <p>Each child process is launched (by the corresponding {@code *Job#buildJobCommand}) with its
+     * own {@code -Dfess.<type>.process=true} system property, set as a JVM argument before the child
+     * even starts, so it is reliably present for the whole child JVM lifetime; the webapp process
+     * never sets any of them. {@link org.codelibs.fess.thumbnail.ThumbnailManager} already reads the
+     * same {@code fess.thumbnail.process} flag for the same purpose (skip webapp-only behavior while
+     * running as that one child). Without this gate, {@link #isStartupBulkReloadTarget(String)}'s
+     * create-only bulk reload would re-run in every one of these child JVMs too -- including
+     * {@code ThumbnailGenerator}, whose job is scheduled {@code * * * * *} (every minute) and
+     * available by default -- silently resurrecting a scheduled job an admin deliberately deleted
+     * within a minute of the deletion.</p>
+     *
+     * @return {@code true} when none of the known job-process markers are set
+     */
+    protected boolean isWebappProcess() {
+        return (!Constants.TRUE.equalsIgnoreCase(System.getProperty("fess." + Constants.EXECUTE_TYPE_CRAWLER + ".process"))
+                && !Constants.TRUE.equalsIgnoreCase(System.getProperty("fess." + Constants.EXECUTE_TYPE_THUMBNAIL + ".process"))
+                && !Constants.TRUE.equalsIgnoreCase(System.getProperty("fess." + Constants.EXECUTE_TYPE_SUGGEST + ".process"))
+                && !Constants.TRUE.equalsIgnoreCase(System.getProperty("fess." + Constants.EXECUTE_TYPE_CHUNK + ".process")));
+    }
+
+    /**
+     * Adds a rewrite rule for document mappings.
+     *
+     * @param rule the rewrite rule to apply to document mappings
+     */
+    public void addDocumentMappingRewriteRule(final UnaryOperator<String> rule) {
+        docMappingRewriteRuleList.add(rule);
+    }
+
+    /**
+     * Updates index aliases to point to a new index.
+     *
+     * @param newIndex the new index to point aliases to
+     * @return true if the alias update was successful, false otherwise
+     */
+    public boolean updateAlias(final String newIndex) {
+        final FessConfig fessConfig = ComponentUtil.getFessConfig();
+        final String updateAlias = fessConfig.getIndexDocumentUpdateIndex();
+        final String searchAlias = fessConfig.getIndexDocumentSearchIndex();
+        final GetIndexResponse response1 =
+                client.admin().indices().prepareGetIndex().addIndices(updateAlias).execute().actionGet(fessConfig.getIndexIndicesTimeout());
+        final String[] updateIndices = response1.indices();
+        final GetIndexResponse response2 =
+                client.admin().indices().prepareGetIndex().addIndices(searchAlias).execute().actionGet(fessConfig.getIndexIndicesTimeout());
+        final String[] searchIndices = response2.indices();
+
+        final IndicesAliasesRequestBuilder builder =
+                client.admin().indices().prepareAliases().addAlias(newIndex, updateAlias).addAlias(newIndex, searchAlias);
+        for (final String index : updateIndices) {
+            builder.removeAlias(index, updateAlias);
+        }
+        for (final String index : searchIndices) {
+            builder.removeAlias(index, searchAlias);
+        }
+        final AcknowledgedResponse response = builder.execute().actionGet(fessConfig.getIndexIndicesTimeout());
+        return response.isAcknowledged();
+    }
+
+    /**
+     * Creates aliases for a newly created index.
+     *
+     * @param index            the index configuration name
+     * @param createdIndexName the actual index name that was created
+     */
+    protected void createAlias(final String index, final String createdIndexName) {
+        final FessConfig fessConfig = ComponentUtil.getFessConfig();
+        // alias
+        final String aliasConfigDirPath = getResourcePath(indexConfigPath, fessConfig.getFesenType(), "/" + index + "/alias");
+        try {
+            final File aliasConfigDir = ResourceUtil.getResourceAsFile(aliasConfigDirPath);
+            if (aliasConfigDir.isDirectory()) {
+                stream(aliasConfigDir.listFiles((dir, name) -> name.endsWith(".json"))).of(stream -> stream.forEach(f -> {
+                    final String aliasName = resolveAliasName(index, f.getName().replaceFirst(".json$", ""));
+                    String source = FileUtil.readUTF8(f);
+                    if ("{}".equals(source.trim())) {
+                        source = null;
+                    }
+                    final AcknowledgedResponse response = client.admin()
+                            .indices()
+                            .prepareAliases()
+                            .addAlias(createdIndexName, aliasName, source)
+                            .execute()
+                            .actionGet(fessConfig.getIndexIndicesTimeout());
+                    if (response.isAcknowledged()) {
+                        logger.info("Created {} alias for {}", aliasName, createdIndexName);
+                    } else if (logger.isDebugEnabled()) {
+                        logger.debug("Failed to create {} alias for {}", aliasName, createdIndexName);
+                    }
+                }));
+            }
+        } catch (final ResourceNotFoundRuntimeException e) {
+            // ignore
+        } catch (final Exception e) {
+            logger.warn("{} is not found.", aliasConfigDirPath, e);
+        }
+    }
+
+    /**
+     * Reads the aliases of the document index from its alias configuration files, for creating
+     * them together with the index. The update alias is marked as the write index, so the search
+     * engine refuses to create a second index behind it.
+     *
+     * @param index the document index configuration name
+     * @return the alias definitions keyed by alias name, or an empty map when there is no alias configuration
+     */
+    protected Map<String, Object> getDocumentIndexAliases(final String index) {
+        final FessConfig fessConfig = ComponentUtil.getFessConfig();
+        final String updateAlias = fessConfig.getIndexDocumentUpdateIndex();
+        final Map<String, Object> aliases = new LinkedHashMap<>();
+        final String aliasConfigDirPath = getResourcePath(indexConfigPath, fessConfig.getFesenType(), "/" + index + "/alias");
+        try {
+            final File aliasConfigDir = ResourceUtil.getResourceAsFile(aliasConfigDirPath);
+            if (aliasConfigDir.isDirectory()) {
+                final ObjectMapper mapper = new ObjectMapper();
+                stream(aliasConfigDir.listFiles((dir, name) -> name.endsWith(".json"))).of(stream -> stream.sorted().forEach(f -> {
+                    final String aliasName = resolveAliasName(index, f.getName().replaceFirst(".json$", ""));
+                    final Map<String, Object> definition =
+                            new LinkedHashMap<>(mapper.readValue(FileUtil.readUTF8(f), new TypeReference<Map<String, Object>>() {
+                            }));
+                    if (updateAlias.equals(aliasName)) {
+                        definition.put("is_write_index", true);
+                    }
+                    aliases.put(aliasName, definition);
+                }));
+            }
+        } catch (final ResourceNotFoundRuntimeException e) {
+            // no alias configuration
+        }
+        return aliases;
+    }
+
+    /**
+     * Resolves the alias name of an alias configuration file against the configured index names.
+     *
+     * @param index     the index configuration name
+     * @param aliasName the alias name taken from the alias configuration file name
+     * @return the alias name to create
+     */
+    protected String resolveAliasName(final String index, final String aliasName) {
+        final FessConfig fessConfig = ComponentUtil.getFessConfig();
+        if (DOC_INDEX.equals(index)) {
+            if ("fess.search".equals(aliasName)) {
+                return fessConfig.getIndexDocumentSearchIndex();
+            }
+            if ("fess.update".equals(aliasName)) {
+                return fessConfig.getIndexDocumentUpdateIndex();
+            }
+        } else if (index.startsWith(CONFIG_INDEX_PREFIX)) {
+            final String name = fessConfig.getIndexConfigIndex();
+            if ("fess_basic_config".equals(aliasName) && !CONFIG_INDEX_PREFIX.equals(name)) {
+                return aliasName.replaceFirst("fess_basic_config", "basic_" + name);
+            }
+            return aliasName.replaceFirst(Pattern.quote(CONFIG_INDEX_PREFIX), name);
+        } else if (index.startsWith(USER_INDEX_PREFIX)) {
+            return aliasName.replaceFirst(Pattern.quote(USER_INDEX_PREFIX), fessConfig.getIndexUserIndex());
+        } else if (index.startsWith(LOG_INDEX_PREFIX)) {
+            return aliasName.replaceFirst(Pattern.quote(LOG_INDEX_PREFIX), fessConfig.getIndexLogIndex());
+        }
+        return aliasName;
+    }
+
+    /**
+     * Sends configuration files to the search engine for an index.
+     *
+     * @param index the index configuration name
+     */
+    protected void sendConfigFiles(final String index) {
+        final FessConfig fessConfig = ComponentUtil.getFessConfig();
+        configListMap.getOrDefault(index, Collections.emptyList()).forEach(path -> {
+            String source = null;
+            final String filePath = indexConfigPath + "/" + index + "/" + path;
+            final String dictionaryPath;
+            if (StringUtil.isNotBlank(fessConfig.getIndexDictionaryPrefix())) {
+                dictionaryPath = fessConfig.getIndexDictionaryPrefix() + "/" + path;
+            } else {
+                dictionaryPath = path;
+            }
+            try {
+                source = FileUtil.readUTF8(filePath);
+                try (CurlResponse response =
+                        ComponentUtil.getCurlHelper().post("/_configsync/file").param("path", dictionaryPath).body(source).execute()) {
+                    if (response.getHttpStatusCode() == 200) {
+                        logger.info("Register {} to {}", path, index);
+                    } else if (response.getContentException() != null) {
+                        logger.warn("Invalid request for {}.", path, response.getContentException());
+                    } else {
+                        logger.warn("Invalid request for {}. The response is {}", path, response.getContentAsString());
+                    }
+                }
+            } catch (final Exception e) {
+                logger.warn("Failed to register {}", filePath, e);
+            }
+        });
+        try (CurlResponse response = ComponentUtil.getCurlHelper().post("/_configsync/flush").execute()) {
+            if (response.getHttpStatusCode() == 200) {
+                logger.info("Flushed config files.");
+            } else {
+                logger.warn("Failed to flush config files.");
+            }
+        } catch (final Exception e) {
+            logger.warn("Failed to flush config files.", e);
+        }
+    }
+
+    /**
+     * Flushes configuration files to the search engine and executes a callback.
+     *
+     * @param callback the callback to execute after flushing
+     */
+    public void flushConfigFiles(final Runnable callback) {
+        final FessConfig fessConfig = ComponentUtil.getFessConfig();
+
+        final String fesenType = fessConfig.getFesenType();
+        switch (fesenType) {
+        case Constants.FESEN_TYPE_CLOUD:
+        case Constants.FESEN_TYPE_AWS:
+            if (logger.isDebugEnabled()) {
+                logger.debug("Skipped configsync flush: {}", fesenType);
+            }
+            callback.run();
+            break;
+        default:
+            ComponentUtil.getCurlHelper().post("/_configsync/flush").execute(response -> {
+                if (logger.isDebugEnabled()) {
+                    logger.debug("Flushed config files: {} => {}", fesenType, response.getContentAsString());
+                }
+                callback.run();
+            }, e -> {
+                logger.warn("Failed to flush config files.", e);
+                callback.run();
+            });
+            break;
+        }
+    }
+
+    /**
+     * Generates a new index name with timestamp suffix.
+     *
+     * @param configIndex the base index configuration name
+     * @return the generated index name with timestamp
+     */
+    protected String generateNewIndexName(final String configIndex) {
+        return configIndex + "." + new SimpleDateFormat(Constants.DOCUMENT_INDEX_SUFFIX_PATTERN).format(new Date());
+    }
+
+    /**
+     * Inserts bulk data from a file into an index.
+     *
+     * @param fessConfig  the Fess configuration
+     * @param configIndex the target index name
+     * @param dataPath    the path to the bulk data file
+     */
+    protected void insertBulkData(final FessConfig fessConfig, final String configIndex, final String dataPath) {
+        insertBulkData(fessConfig, configIndex, dataPath, false);
+    }
+
+    /**
+     * Inserts bulk data from a file into an index.
+     *
+     * @param fessConfig  the Fess configuration
+     * @param configIndex the target index name
+     * @param dataPath    the path to the bulk data file
+     * @param createOnly  if true, uses OpType.CREATE to skip existing documents
+     */
+    protected void insertBulkData(final FessConfig fessConfig, final String configIndex, final String dataPath, final boolean createOnly) {
+        try {
+            final BulkRequestBuilder builder = client.prepareBulk();
+            final ObjectMapper mapper = new ObjectMapper();
+            final String userIndex = fessConfig.getIndexUserIndex() + ".user";
+            Arrays.stream(FileUtil.readUTF8(dataPath).split("\n"))
+                    .map(line -> line//
+                            .replace("\"_index\":\"fess_config.", "\"_index\":\"" + fessConfig.getIndexConfigIndex() + ".")//
+                            .replace("\"_index\":\"fess_user.", "\"_index\":\"" + fessConfig.getIndexUserIndex() + ".")//
+                            .replace("\"_index\":\"fess_log.", "\"_index\":\"" + fessConfig.getIndexLogIndex() + "."))
+                    .reduce((prev, line) -> {
+                        try {
+                            if (StringUtil.isBlank(prev)) {
+                                final Map<String, Map<String, String>> result =
+                                        mapper.readValue(line, new TypeReference<Map<String, Map<String, String>>>() {
+                                        });
+                                if (result.containsKey("index") || result.containsKey("update")) {
+                                    return line;
+                                }
+                                if (result.containsKey("delete")) {
+                                    return StringUtil.EMPTY;
+                                }
+                            } else {
+                                final Map<String, Map<String, String>> result =
+                                        mapper.readValue(prev, new TypeReference<Map<String, Map<String, String>>>() {
+                                        });
+                                if (result.containsKey("index")) {
+                                    String source = line;
+                                    if (userIndex.equals(configIndex)) {
+                                        source = source.replace("${fess.index.initial_password}",
+                                                ComponentUtil.getPasswordHashHelper().encode(fessConfig.getIndexUserInitialPassword()));
+                                    }
+                                    final IndexRequestBuilder requestBuilder = client.prepareIndex()
+                                            .setIndex(configIndex)
+                                            .setId(result.get("index").get("_id"))
+                                            .setSource(source, XContentType.JSON);
+                                    if (createOnly) {
+                                        requestBuilder.setOpType(OpType.CREATE);
+                                    }
+                                    builder.add(requestBuilder);
+                                }
+                            }
+                        } catch (final Exception e) {
+                            logger.warn("Failed to parse {}", dataPath, e);
+                        }
+                        return StringUtil.EMPTY;
+                    });
+            final BulkResponse response = builder.execute().actionGet(fessConfig.getIndexBulkTimeout());
+            if (response.hasFailures()) {
+                if (createOnly) {
+                    final long realFailures = Arrays.stream(response.getItems())
+                            .filter(item -> item.isFailed() && item.getFailure().getStatus() != RestStatus.CONFLICT)
+                            .count();
+                    if (realFailures > 0) {
+                        logger.warn("Failed to register {}: {}", dataPath, response.buildFailureMessage());
+                    } else if (logger.isDebugEnabled()) {
+                        logger.debug("Skipped existing documents in {}", dataPath);
+                    }
+                } else {
+                    logger.warn("Failed to register {}: {}", dataPath, response.buildFailureMessage());
+                }
+            }
+            if (createOnly && logger.isInfoEnabled()) {
+                // For a createOnly (OpType.CREATE) bulk, an item that did not fail is a document
+                // that did not already exist and was therefore genuinely just created -- e.g. the
+                // periodic startup reload registering a scheduled job newly shipped in this release.
+                // Without this, that reload is entirely silent when it does something (the WARN/DEBUG
+                // branches above only ever report failures or an all-skipped no-op).
+                final long created = Arrays.stream(response.getItems()).filter(item -> !item.isFailed()).count();
+                if (created > 0) {
+                    logger.info("Registered {} new document(s) in {} from {}", created, configIndex, dataPath);
+                }
+            }
+        } catch (final Exception e) {
+            logger.warn("Failed to create {} mapping.", configIndex, e);
+        }
+    }
+
+    /**
+     * Waits for the search engine cluster to reach yellow or green status.
+     *
+     * @param fessConfig the Fess configuration
+     * @throws ContainerInitFailureException if the cluster doesn't become available
+     */
+    protected void waitForYellowStatus(final FessConfig fessConfig) {
+        Exception cause = null;
+        final SystemHelper systemHelper = ComponentUtil.getSystemHelper();
+        final long startTime = systemHelper.getCurrentTimeAsLong();
+        for (int i = 0; i < maxEsStatusRetry; i++) {
+            try {
+                final ClusterHealthResponse response = client.admin()
+                        .cluster()
+                        .prepareHealth()
+                        .setWaitForYellowStatus()
+                        .execute()
+                        .actionGet(fessConfig.getIndexHealthTimeout());
+                if (logger.isDebugEnabled()) {
+                    logger.debug("Fesen Cluster Status: {}", response.getStatus());
+                }
+                return;
+            } catch (final Exception e) {
+                cause = e;
+            }
+            if (cause instanceof OpenSearchStatusException) {
+                final RestStatus status = ((OpenSearchStatusException) cause).status();
+                switch (status) {
+                case UNAUTHORIZED -> logger.warn("[{}] Unauthorized access: {}", i, SystemUtil.getSearchEngineHttpAddress(), cause);
+                default -> logger.debug("[{}][{}] Failed to access to Fesen ({})", i, status, SystemUtil.getSearchEngineHttpAddress(),
+                        cause);
+                }
+            } else if (logger.isDebugEnabled()) {
+                logger.debug("[{}] Failed to access to Fesen ({})", i, SystemUtil.getSearchEngineHttpAddress(), cause);
+            }
+            ThreadUtil.sleep(1000L);
+        }
+        final String message = "The search engine at " + SystemUtil.getSearchEngineHttpAddress() + " did not become available within "
+                + (systemHelper.getCurrentTimeAsLong() - startTime) + "ms. Check that OpenSearch is running and reachable."
+                + " If there is none yet, run bin/fess-setup install opensearch to set one up.";
+        throw new ContainerInitFailureException(message, cause);
+    }
+
+    /**
+     * Waits for the configuration synchronization service to become available.
+     *
+     * @throws FessSystemException if ConfigSync doesn't become available
+     */
+    protected void waitForConfigSyncStatus() {
+        FessSystemException cause = null;
+        for (int i = 0; i < maxConfigSyncStatusRetry; i++) {
+            try (CurlResponse response = ComponentUtil.getCurlHelper().get("/_configsync/wait").param("status", "green").execute()) {
+                final int httpStatusCode = response.getHttpStatusCode();
+                if (httpStatusCode == 200) {
+                    logger.info("ConfigSync is ready.");
+                    return;
+                }
+                final String message = "Configsync is not available. HTTP Status is " + httpStatusCode;
+                if (response.getContentException() != null) {
+                    throw new FessSystemException(message, response.getContentException());
+                }
+                throw new FessSystemException(message);
+            } catch (final Exception e) {
+                cause = new FessSystemException("Configsync is not available.", e);
+            }
+            if (logger.isDebugEnabled()) {
+                logger.debug("Failed to access to configsync:{}", i, cause);
+            }
+            ThreadUtil.sleep(1000L);
+        }
+        throw cause;
+    }
+
+    @Override
+    @PreDestroy
+    public void close() {
+        try {
+            client.admin()
+                    .indices()
+                    .prepareFlush()
+                    .setForce(true)
+                    .execute()
+                    .actionGet(ComponentUtil.getFessConfig().getIndexIndicesTimeout());
+        } catch (final Exception e) {
+            logger.warn("Failed to flush indices.", e);
+        }
+        try {
+            client.close();
+        } catch (final OpenSearchException e) {
+            logger.warn("Failed to close Client: {}", client, e);
+        }
+    }
+
+    /**
+     * Updates documents in an index using a query.
+     *
+     * @param index   the index name
+     * @param option  function to customize the search request
+     * @param builder function to build update requests from search hits
+     * @return the number of documents processed
+     */
+    public long updateByQuery(final String index, final Function<SearchRequestBuilder, SearchRequestBuilder> option,
+            final BiFunction<UpdateRequestBuilder, SearchHit, UpdateRequestBuilder> builder) {
+
+        final FessConfig fessConfig = ComponentUtil.getFessConfig();
+        final SearchRequestBuilder searchRequestBuilder =
+                option.apply(client.prepareSearch().setSize(sizeForUpdate).setPreference(Constants.SEARCH_PREFERENCE_LOCAL));
+
+        final long[] count = { 0 };
+        pitSearch(index, scrollForUpdate, fessConfig.getIndexScrollSearchTimeout(), searchRequestBuilder, response -> {
+            final BulkRequestBuilder bulkRequest = client.prepareBulk();
+            for (final SearchHit hit : response.getHits().getHits()) {
+                final UpdateRequestBuilder requestBuilder = builder.apply(client.prepareUpdate().setIndex(index).setId(hit.getId()), hit);
+                if (requestBuilder != null) {
+                    bulkRequest.add(requestBuilder);
+                }
+                count[0]++;
+            }
+            final BulkResponse bulkResponse = bulkRequest.execute().actionGet(fessConfig.getIndexBulkTimeout());
+            if (bulkResponse.hasFailures()) {
+                throw new IllegalBehaviorStateException(bulkResponse.buildFailureMessage());
+            }
+            return true;
+        });
+        return count[0];
+    }
+
+    /**
+     * Deletes documents in an index matching a query.
+     *
+     * @param index        the index name
+     * @param queryBuilder the query to match documents for deletion
+     * @return the number of documents deleted
+     */
+    public long deleteByQuery(final String index, final QueryBuilder queryBuilder) {
+
+        final FessConfig fessConfig = ComponentUtil.getFessConfig();
+        final SearchRequestBuilder searchRequestBuilder = client.prepareSearch()
+                .setSize(sizeForDelete)
+                .setFetchSource(new String[] { fessConfig.getIndexFieldId() }, null)
+                .setQuery(queryBuilder)
+                .setPreference(Constants.SEARCH_PREFERENCE_LOCAL);
+
+        final long[] count = { 0 };
+        pitSearch(index, scrollForDelete, fessConfig.getIndexScrollSearchTimeout(), searchRequestBuilder, response -> {
+            final BulkRequestBuilder bulkRequest = client.prepareBulk();
+            for (final SearchHit hit : response.getHits().getHits()) {
+                bulkRequest.add(client.prepareDelete().setIndex(index).setId(hit.getId()));
+                count[0]++;
+            }
+            final BulkResponse bulkResponse = bulkRequest.execute().actionGet(fessConfig.getIndexBulkTimeout());
+            if (bulkResponse.hasFailures()) {
+                throw new IllegalBehaviorStateException(bulkResponse.buildFailureMessage());
+            }
+            return true;
+        });
+        return count[0];
+    }
+
+    /**
+     * Pages over every document the given search matches, using a point in time and
+     * {@code search_after}.
+     *
+     * <p>A {@code _shard_doc} tiebreaker is appended to whatever sort the caller set, which makes
+     * the order total so that {@code search_after} can walk it without skipping or repeating a
+     * document. That sort field requires an OpenSearch 3.x server; 2.x does not implement it.</p>
+     *
+     * <p>A point in time carries the indices, routing and preference itself, and a search that
+     * repeats any of them is rejected with a 400. Over HTTP such a 400 on a request with a body
+     * does not surface as an error, it hangs. So the search is issued without an index and the
+     * routing and preference are moved onto the create request.</p>
+     *
+     * @param index the index the point in time is opened on
+     * @param keepAlive how long the point in time stays alive; every page extends it
+     * @param searchTimeout how long to wait for each page
+     * @param builder the search to page over, already configured by the caller
+     * @param pageHandler called once per page; returning false ends the walk
+     */
+    protected void pitSearch(final String index, final String keepAlive, final String searchTimeout, final SearchRequestBuilder builder,
+            final BooleanFunction<SearchResponse> pageHandler) {
+        // _shard_doc alone is not a total order once the point in time spans more than one index:
+        // the value restarts per index, so the same number appears in several of them. search_after
+        // asks for values strictly greater than the last one on the page, so a page that ends on a
+        // repeated value drops every document another index still holds at or below it. Ordering by
+        // the index name as well makes the pair unique again.
+        builder.addSort(SortBuilders.shardDocSort());
+        builder.addSort(SortBuilders.fieldSort("_index").order(SortOrder.ASC));
+
+        final SearchRequest request = builder.request();
+        final TimeValue keepAliveValue = TimeValue.parseTimeValue(keepAlive, "keepAlive");
+        final CreatePitRequest createPitRequest = new CreatePitRequest(keepAliveValue, true, index);
+        if (request.preference() != null) {
+            createPitRequest.setPreference(request.preference());
+            request.preference(null);
+        }
+        if (request.routing() != null) {
+            createPitRequest.setRouting(request.routing());
+            request.routing((String) null);
+        }
+        final String pitId = client.execute(CreatePitAction.INSTANCE, createPitRequest).actionGet(searchTimeout).getId();
+        if (pitId == null) {
+            // A closed or otherwise unavailable index answers with no identifier rather than an
+            // error, and the builder below would then fail with a bare NullPointerException that
+            // says nothing about the index.
+            throw new SearchEngineClientException("[" + index + "] Failed to open a point in time.");
+        }
+        try {
+            builder.setPointInTime(new PointInTimeBuilder(pitId).setKeepAlive(keepAliveValue));
+            Object[] searchAfter = null;
+            while (true) {
+                if (searchAfter != null) {
+                    builder.searchAfter(searchAfter);
+                }
+                final SearchResponse response = builder.execute().actionGet(searchTimeout);
+                final SearchHit[] hits = response.getHits().getHits();
+                if (hits.length == 0) {
+                    break;
+                }
+                if (!pageHandler.apply(response)) {
+                    break;
+                }
+                searchAfter = hits[hits.length - 1].getSortValues();
+            }
+        } finally {
+            deletePitContext(pitId);
+        }
+    }
+
+    /**
+     * Releases a point in time. Failures are logged rather than propagated, so that releasing in a
+     * finally block cannot mask an exception that is already unwinding.
+     *
+     * @param pitId the point in time to release
+     */
+    protected void deletePitContext(final String pitId) {
+        if (pitId != null) {
+            client.deletePits(new DeletePitRequest(pitId), wrap(res -> {}, e -> logger.warn("Failed to delete the point in time.", e)));
+        }
+    }
+
+    /**
+     * Retrieves a document by ID with custom conditions and result processing.
+     *
+     * @param <T>          the result type
+     * @param index        the index name
+     * @param id           the document ID
+     * @param condition    the search condition
+     * @param searchResult the result processor
+     * @return the processed result
+     */
+    protected <T> T get(final String index, final String id, final SearchCondition<GetRequestBuilder> condition,
+            final SearchResult<T, GetRequestBuilder, GetResponse> searchResult) {
+        final SystemHelper systemHelper = ComponentUtil.getSystemHelper();
+        final long startTime = systemHelper.getCurrentTimeAsLong();
+
+        GetResponse response = null;
+        final GetRequestBuilder requestBuilder = client.prepareGet(index, id);
+        if (condition.build(requestBuilder)) {
+            response = requestBuilder.execute().actionGet(ComponentUtil.getFessConfig().getIndexSearchTimeout());
+        }
+        final long execTime = systemHelper.getCurrentTimeAsLong() - startTime;
+
+        return searchResult.build(requestBuilder, execTime, OptionalEntity.ofNullable(response, () -> {}));
+    }
+
+    /**
+     * Performs a search with custom conditions and result processing.
+     *
+     * @param <T>          the result type
+     * @param index        the index name
+     * @param condition    the search condition
+     * @param searchResult the result processor
+     * @return the processed search result
+     * @throws InvalidQueryException if the query is invalid
+     */
+    public <T> T search(final String index, final SearchCondition<SearchRequestBuilder> condition,
+            final SearchResult<T, SearchRequestBuilder, SearchResponse> searchResult) {
+        final SystemHelper systemHelper = ComponentUtil.getSystemHelper();
+        final long startTime = systemHelper.getCurrentTimeAsLong();
+
+        SearchResponse searchResponse = null;
+        final SearchRequestBuilder searchRequestBuilder = client.prepareSearch(index);
+        if (condition.build(searchRequestBuilder)) {
+
+            final FessConfig fessConfig = ComponentUtil.getFessConfig();
+            final long queryTimeout = fessConfig.getQueryTimeoutAsInteger().longValue();
+            if (queryTimeout >= 0) {
+                searchRequestBuilder.setTimeout(TimeValue.timeValueMillis(queryTimeout));
+            }
+
+            try {
+                if (logger.isDebugEnabled()) {
+                    logger.debug("Query DSL: {}", searchRequestBuilder);
+                }
+                searchResponse = searchRequestBuilder.execute().actionGet(ComponentUtil.getFessConfig().getIndexSearchTimeout());
+            } catch (final SearchPhaseExecutionException e) {
+                // The builder dump goes to the log, never into the exception message: callers
+                // report that message to the client, and the dump carries the role filter terms,
+                // the _source allow-list, internal field names and the per-field boosts.
+                if (logger.isDebugEnabled()) {
+                    logger.debug("Invalid query {}", searchRequestBuilder, e);
+                }
+                throw new InvalidQueryException(messages -> messages.addErrorsInvalidQueryParseError(UserMessages.GLOBAL_PROPERTY_KEY),
+                        "Invalid query.", e);
+            } catch (final OpenSearchException e) {
+                if (logger.isDebugEnabled()) {
+                    logger.debug("Cannot process {}", searchRequestBuilder, e);
+                }
+                throw new InvalidQueryException(messages -> messages.addErrorsInvalidQueryCannotProcess(UserMessages.GLOBAL_PROPERTY_KEY),
+                        "Failed to process the query.", e);
+            }
+        }
+        final long execTime = systemHelper.getCurrentTimeAsLong() - startTime;
+
+        return searchResult.build(searchRequestBuilder, execTime, OptionalEntity.ofNullable(searchResponse, () -> {}));
+    }
+
+    /**
+     * Performs a scroll search with default entity creation.
+     *
+     * @param index     the index name
+     * @param condition the search condition
+     * @param cursor    the cursor function to process each hit
+     * @return the number of documents processed
+     * @throws InvalidQueryException if the query is invalid
+     */
+    public long scrollSearch(final String index, final SearchCondition<SearchRequestBuilder> condition,
+            final BooleanFunction<Map<String, Object>> cursor) {
+        return scrollSearch(index, condition, getDefaultEntityCreator(), cursor);
+    }
+
+    /**
+     * Performs a scroll search with custom entity creation.
+     *
+     * @param <T>       the entity type
+     * @param index     the index name
+     * @param condition the search condition
+     * @param creator   the entity creator
+     * @param cursor    the cursor function to process each entity
+     * @return the number of documents processed
+     * @throws InvalidQueryException if the query is invalid
+     */
+    public <T> long scrollSearch(final String index, final SearchCondition<SearchRequestBuilder> condition,
+            final EntityCreator<T, SearchResponse, SearchHit> creator, final BooleanFunction<T> cursor) {
+        final long[] count = { 0 };
+
+        final SearchRequestBuilder searchRequestBuilder = client.prepareSearch();
+        if (condition.build(searchRequestBuilder)) {
+            final FessConfig fessConfig = ComponentUtil.getFessConfig();
+            try {
+                if (logger.isDebugEnabled()) {
+                    logger.debug("Query DSL: {}", searchRequestBuilder);
+                }
+                pitSearch(index, scrollForSearch, fessConfig.getIndexSearchTimeout(), searchRequestBuilder, response -> {
+                    for (final SearchHit hit : response.getHits().getHits()) {
+                        count[0]++;
+                        if (!cursor.apply(creator.build(response, hit))) {
+                            return false;
+                        }
+                    }
+                    return true;
+                });
+            } catch (final SearchPhaseExecutionException e) {
+                // Same contract as search(): the dump is for the log, the exception message is
+                // what the scroll API hands back to the caller.
+                if (logger.isDebugEnabled()) {
+                    logger.debug("Invalid query {}", searchRequestBuilder, e);
+                }
+                throw new InvalidQueryException(messages -> messages.addErrorsInvalidQueryParseError(UserMessages.GLOBAL_PROPERTY_KEY),
+                        "Invalid query.", e);
+            }
+        }
+
+        return count[0];
+    }
+
+    /**
+     * Retrieves a single document matching the search condition.
+     *
+     * @param index     the index name
+     * @param condition the search condition
+     * @return an optional containing the document if found
+     */
+    public OptionalEntity<Map<String, Object>> getDocument(final String index, final SearchCondition<SearchRequestBuilder> condition) {
+        return getDocument(index, condition, (response, hit) -> {
+            final FessConfig fessConfig = ComponentUtil.getFessConfig();
+            final Map<String, Object> source = hit.getSourceAsMap();
+            if (source != null) {
+                final Map<String, Object> docMap = new HashMap<>(source);
+                docMap.put(fessConfig.getIndexFieldId(), hit.getId());
+                docMap.put(fessConfig.getIndexFieldVersion(), hit.getVersion());
+                docMap.put(fessConfig.getIndexFieldSeqNo(), hit.getSeqNo());
+                docMap.put(fessConfig.getIndexFieldPrimaryTerm(), hit.getPrimaryTerm());
+                return docMap;
+            }
+            final Map<String, DocumentField> fields = hit.getFields();
+            if (fields != null) {
+                final Map<String, Object> docMap = fields.entrySet()
+                        .stream()
+                        .collect(Collectors.toMap(Entry<String, DocumentField>::getKey, e -> (Object) e.getValue().getValues()));
+                docMap.put(fessConfig.getIndexFieldId(), hit.getId());
+                docMap.put(fessConfig.getIndexFieldVersion(), hit.getVersion());
+                docMap.put(fessConfig.getIndexFieldSeqNo(), hit.getSeqNo());
+                docMap.put(fessConfig.getIndexFieldPrimaryTerm(), hit.getPrimaryTerm());
+                return docMap;
+            }
+            return null;
+        });
+    }
+
+    /**
+     * Retrieves a single document with custom entity creation.
+     *
+     * @param <T>       the entity type
+     * @param index     the index name
+     * @param condition the search condition
+     * @param creator   the entity creator
+     * @return an optional containing the entity if found
+     */
+    protected <T> OptionalEntity<T> getDocument(final String index, final SearchCondition<SearchRequestBuilder> condition,
+            final EntityCreator<T, SearchResponse, SearchHit> creator) {
+        return search(index, searchRequestBuilder -> {
+            searchRequestBuilder.setVersion(true);
+            return condition.build(searchRequestBuilder);
+        }, (queryBuilder, execTime, searchResponse) -> searchResponse.map(response -> {
+            final SearchHit[] hits = response.getHits().getHits();
+            if (hits.length > 0) {
+                return creator.build(response, hits[0]);
+            }
+            return null;
+        }));
+    }
+
+    /**
+     * Retrieves a list of documents matching the search condition.
+     *
+     * @param index     the index name
+     * @param condition the search condition
+     * @return a list of documents
+     */
+    public List<Map<String, Object>> getDocumentList(final String index, final SearchCondition<SearchRequestBuilder> condition) {
+        return getDocumentList(index, condition, getDefaultEntityCreator());
+    }
+
+    /**
+     * Gets the default entity creator for converting search hits to maps.
+     *
+     * @return the default entity creator
+     */
+    protected EntityCreator<Map<String, Object>, SearchResponse, SearchHit> getDefaultEntityCreator() {
+        return (response, hit) -> {
+            final FessConfig fessConfig = ComponentUtil.getFessConfig();
+            final Map<String, Object> source = hit.getSourceAsMap();
+            if (source != null) {
+                final Map<String, Object> docMap = new HashMap<>(source);
+                docMap.put(fessConfig.getIndexFieldId(), hit.getId());
+                return docMap;
+            }
+            final Map<String, DocumentField> fields = hit.getFields();
+            if (fields != null) {
+                final Map<String, Object> docMap = fields.entrySet()
+                        .stream()
+                        .collect(Collectors.toMap(Entry<String, DocumentField>::getKey, e -> (Object) e.getValue().getValues()));
+                docMap.put(fessConfig.getIndexFieldId(), hit.getId());
+                return docMap;
+            }
+            return null;
+        };
+    }
+
+    /**
+     * Retrieves a list of documents with custom entity creation.
+     *
+     * @param <T>       the entity type
+     * @param index     the index name
+     * @param condition the search condition
+     * @param creator   the entity creator
+     * @return a list of entities
+     */
+    protected <T> List<T> getDocumentList(final String index, final SearchCondition<SearchRequestBuilder> condition,
+            final EntityCreator<T, SearchResponse, SearchHit> creator) {
+        return search(index, condition, (searchRequestBuilder, execTime, searchResponse) -> {
+            final List<T> list = new ArrayList<>();
+            searchResponse.ifPresent(response -> response.getHits().forEach(hit -> {
+                list.add(creator.build(response, hit));
+            }));
+            return list;
+        });
+    }
+
+    /**
+     * Updates a specific field in a document.
+     *
+     * @param index the index name
+     * @param id    the document ID
+     * @param field the field name to update
+     * @param value the new field value
+     * @return true if the update was successful, false otherwise
+     * @throws SearchEngineClientException if the update fails
+     */
+    public boolean update(final String index, final String id, final String field, final Object value) {
+        // Using ingest pipelines with doc_as_upsert is not supported.
+        if (usePipeline) {
+            return updateByIdWithScript(index, id, field, value);
+        }
+        try {
+            final Result result = client.prepareUpdate()
+                    .setIndex(index)
+                    .setId(id)
+                    .setDoc(field, value)
+                    .execute()
+                    .actionGet(ComponentUtil.getFessConfig().getIndexIndexTimeout())
+                    .getResult();
+            return result == Result.CREATED || result == Result.UPDATED;
+        } catch (final OpenSearchException e) {
+            throw new SearchEngineClientException("[" + index + "] Failed to set " + value + " to " + field + " for doc " + id, e);
+        }
+    }
+
+    /**
+     * Updates a document by ID using a script when pipelines are enabled.
+     *
+     * @param index the index name
+     * @param id    the document ID
+     * @param field the field name to update
+     * @param value the new field value
+     * @return true if the update was successful, false otherwise
+     * @throws SearchEngineClientException if the update fails
+     */
+    protected boolean updateByIdWithScript(final String index, final String id, final String field, final Object value) {
+        final FessConfig fessConfig = ComponentUtil.getFessConfig();
+        final UpdateByQueryRequest request = new UpdateByQueryRequest(index).setQuery(QueryBuilders.idsQuery().addIds(id))
+                .setScript(new Script(ScriptType.INLINE, "painless",
+                        "ctx._source[params.f]=params.v;" + ComponentUtil.getLanguageHelper().getReindexScriptSource(),
+                        Map.of("f", field, "v", value)));
+        try {
+            final String source = SearchEngineUtil.getXContentString(request, XContentType.JSON);
+            if (logger.isDebugEnabled()) {
+                logger.debug("update script by id: {}", source);
+            }
+            final String refresh = StringUtil.isNotBlank(fessConfig.getIndexReindexRefresh()) ? fessConfig.getIndexReindexRefresh() : null;
+            try (CurlResponse response = ComponentUtil.getCurlHelper()
+                    .post("/" + index + "/_update_by_query")
+                    .param("refresh", refresh)
+                    .param("max_docs", "1")
+                    .body(source)
+                    .execute()) {
+                if (response.getHttpStatusCode() == 200) {
+                    return true;
+                }
+                return false;
+            }
+        } catch (final IOException e) {
+            throw new SearchEngineClientException("[" + index + "] Failed to set " + value + " to " + field + " for doc " + id, e);
+        }
+    }
+
+    /**
+     * Refreshes the specified indices to make recent changes visible for search.
+     *
+     * @param indices the indices to refresh
+     */
+    public void refresh(final String... indices) {
+        client.admin().indices().prepareRefresh(indices).execute(new ActionListener<RefreshResponse>() {
+            @Override
+            public void onResponse(final RefreshResponse response) {
+                if (logger.isDebugEnabled()) {
+                    logger.debug(() -> "Refreshed " + stream(indices).get(stream -> stream.collect(Collectors.joining(", "))));
+                }
+            }
+
+            @Override
+            public void onFailure(final Exception e) {
+                logger.error(() -> "Failed to refresh " + stream(indices).get(stream -> stream.collect(Collectors.joining(", "))), e);
+            }
+        });
+
+    }
+
+    /**
+     * Flushes the specified indices to ensure data is written to disk.
+     *
+     * @param indices the indices to flush
+     */
+    public void flush(final String... indices) {
+        client.admin().indices().prepareFlush(indices).execute(new ActionListener<FlushResponse>() {
+
+            @Override
+            public void onResponse(final FlushResponse response) {
+                if (logger.isDebugEnabled()) {
+                    logger.debug(() -> "Flushed " + stream(indices).get(stream -> stream.collect(Collectors.joining(", "))));
+                }
+            }
+
+            @Override
+            public void onFailure(final Exception e) {
+                logger.error(() -> "Failed to flush " + stream(indices).get(stream -> stream.collect(Collectors.joining(", "))), e);
+            }
+        });
+
+    }
+
+    /**
+     * Pings the search engine cluster to check connectivity and health.
+     *
+     * @return the ping response with cluster information
+     * @throws SearchEngineClientException if the ping fails
+     */
+    public PingResponse ping() {
+        try {
+            final ClusterHealthResponse response =
+                    client.admin().cluster().prepareHealth().execute().actionGet(ComponentUtil.getFessConfig().getIndexHealthTimeout());
+            return new PingResponse(response);
+        } catch (final OpenSearchException e) {
+            throw new SearchEngineClientException("Failed to process a ping request.", e);
+        }
+    }
+
+    /**
+     * Adds multiple documents to the specified index in bulk.
+     *
+     * @param index   the target index
+     * @param docList list of documents to add
+     * @param options callback for customizing index request options
+     * @return the bulk response
+     */
+    public BulkResponse addAll(final String index, final List<Map<String, Object>> docList,
+            final BiConsumer<Map<String, Object>, IndexRequestBuilder> options) {
+        final FessConfig fessConfig = ComponentUtil.getFessConfig();
+        final BulkRequestBuilder bulkRequestBuilder = client.prepareBulk();
+        for (final Map<String, Object> doc : docList) {
+            final Object id = doc.remove(fessConfig.getIndexFieldId());
+            final IndexRequestBuilder builder = client.prepareIndex().setIndex(index).setId(id.toString()).setSource(new DocMap(doc));
+            options.accept(doc, builder);
+            bulkRequestBuilder.add(builder);
+        }
+        return bulkRequestBuilder.execute().actionGet(ComponentUtil.getFessConfig().getIndexBulkTimeout());
+    }
+
+    /**
+     * Builder class for constructing search conditions and parameters.
+     */
+    public static class SearchConditionBuilder {
+        /** The search request builder being configured */
+        protected final SearchRequestBuilder searchRequestBuilder;
+        /** The search query string */
+        protected String query;
+        /** Fields to include in the response */
+        protected String[] responseFields;
+        /** Search result offset (number of results to skip) */
+        protected int offset = Constants.DEFAULT_START_COUNT;
+        /** Maximum number of results to return */
+        protected int size = Constants.DEFAULT_PAGE_SIZE;
+        /** Geographic search information */
+        protected GeoInfo geoInfo;
+        /** Facet configuration for aggregations */
+        protected FacetInfo facetInfo;
+        /** Highlighting configuration */
+        protected HighlightInfo highlightInfo;
+        /** Hash of document for similarity search */
+        protected String similarDocHash;
+        /** Type of search request */
+        protected SearchRequestType searchRequestType = SearchRequestType.SEARCH;
+        /** Whether scroll mode is enabled for large result sets */
+        protected boolean isScroll = false;
+        /** Track total hits configuration */
+        protected String trackTotalHits = null;
+        /** Minimum score threshold for results */
+        protected Float minScore = null;
+
+        /**
+         * Creates a new SearchConditionBuilder instance.
+         *
+         * @param searchRequestBuilder the search request builder to configure
+         * @return a new SearchConditionBuilder instance
+         */
+        public static SearchConditionBuilder builder(final SearchRequestBuilder searchRequestBuilder) {
+            return new SearchConditionBuilder(searchRequestBuilder);
+        }
+
+        /**
+         * Constructor for SearchConditionBuilder.
+         *
+         * @param searchRequestBuilder the search request builder to configure
+         */
+        SearchConditionBuilder(final SearchRequestBuilder searchRequestBuilder) {
+            this.searchRequestBuilder = searchRequestBuilder;
+        }
+
+        /**
+         * Gets the current search condition as a map.
+         *
+         * @return a map containing the search condition parameters
+         */
+        public Map<String, Object> condition() {
+            final Map<String, Object> params = new HashMap<>();
+            params.put("query", query);
+            params.put("responseFields", responseFields);
+            params.put("offset", offset);
+            params.put("size", size);
+            // TODO support rescorer(convert to map)
+            // params.put("geoInfo", geoInfo);
+            // params.put("facetInfo", facetInfo);
+            params.put("similarDocHash", similarDocHash);
+            return params;
+        }
+
+        /**
+         * Sets the search query string.
+         *
+         * @param query the query string
+         * @return this builder for method chaining
+         */
+        public SearchConditionBuilder query(final String query) {
+            this.query = query;
+            return this;
+        }
+
+        /**
+         * Sets the search request type.
+         *
+         * @param searchRequestType the search request type
+         * @return this builder for method chaining
+         */
+        public SearchConditionBuilder searchRequestType(final SearchRequestType searchRequestType) {
+            this.searchRequestType = searchRequestType;
+            return this;
+        }
+
+        /**
+         * Sets the fields to include in the response.
+         *
+         * @param responseFields the fields to include in the response
+         * @return this builder for method chaining
+         */
+        public SearchConditionBuilder responseFields(final String[] responseFields) {
+            this.responseFields = responseFields;
+            return this;
+        }
+
+        /**
+         * Sets the search result offset.
+         *
+         * @param offset the number of results to skip
+         * @return this builder for method chaining
+         */
+        public SearchConditionBuilder offset(final int offset) {
+            this.offset = offset;
+            return this;
+        }
+
+        /**
+         * Sets the maximum number of results to return.
+         *
+         * @param size the maximum number of results
+         * @return this builder for method chaining
+         */
+        public SearchConditionBuilder size(final int size) {
+            this.size = size;
+            return this;
+        }
+
+        /**
+         * Sets the geographic search information.
+         *
+         * @param geoInfo the geographic search information
+         * @return this builder for method chaining
+         */
+        public SearchConditionBuilder geoInfo(final GeoInfo geoInfo) {
+            this.geoInfo = geoInfo;
+            return this;
+        }
+
+        /**
+         * Sets the highlighting information.
+         *
+         * @param highlightInfo the highlighting configuration
+         * @return this builder for method chaining
+         */
+        public SearchConditionBuilder highlightInfo(final HighlightInfo highlightInfo) {
+            this.highlightInfo = highlightInfo;
+            return this;
+        }
+
+        /**
+         * Sets the similar document hash for similarity search.
+         *
+         * @param similarDocHash the hash of the document to find similar documents to
+         * @return this builder for method chaining
+         */
+        public SearchConditionBuilder similarDocHash(final String similarDocHash) {
+            if (StringUtil.isNotBlank(similarDocHash)) {
+                this.similarDocHash = similarDocHash;
+            }
+            return this;
+        }
+
+        /**
+         * Sets the facet information for aggregations.
+         *
+         * @param facetInfo the facet configuration
+         * @return this builder for method chaining
+         */
+        public SearchConditionBuilder facetInfo(final FacetInfo facetInfo) {
+            this.facetInfo = facetInfo;
+            return this;
+        }
+
+        /**
+         * Enables scroll mode for large result sets.
+         *
+         * @return this builder for method chaining
+         */
+        public SearchConditionBuilder scroll() {
+            isScroll = true;
+            return this;
+        }
+
+        /**
+         * Sets the track total hits configuration.
+         *
+         * @param trackTotalHits the track total hits setting
+         * @return this builder for method chaining
+         */
+        public SearchConditionBuilder trackTotalHits(final String trackTotalHits) {
+            this.trackTotalHits = trackTotalHits;
+            return this;
+        }
+
+        /**
+         * Sets the minimum score threshold for results.
+         *
+         * @param minScore the minimum score threshold
+         * @return this builder for method chaining
+         */
+        public SearchConditionBuilder minScore(final Float minScore) {
+            this.minScore = minScore;
+            return this;
+        }
+
+        /**
+         * Builds the search request with all configured parameters.
+         *
+         * @return true if the build was successful, false if the query is blank
+         * @throws ResultOffsetExceededException if the offset exceeds the maximum allowed
+         * @throws InvalidQueryException if a requested facet field is not allowed
+         */
+        public boolean build() {
+            if (StringUtil.isBlank(query)) {
+                return false;
+            }
+
+            final QueryHelper queryHelper = ComponentUtil.getQueryHelper();
+            final QueryFieldConfig queryFieldConfig = ComponentUtil.getQueryFieldConfig();
+            final FessConfig fessConfig = ComponentUtil.getFessConfig();
+
+            if (offset > fessConfig.getQueryMaxSearchResultOffsetAsInteger()) {
+                throw new ResultOffsetExceededException("The number of result size is exceeded.");
+            }
+
+            final QueryContext queryContext = buildQueryContext(queryHelper, queryFieldConfig, fessConfig);
+
+            searchRequestBuilder.setFrom(offset).setSize(size);
+
+            buildTrackTotalHits(fessConfig);
+            buildMinScore(fessConfig);
+
+            if (responseFields != null) {
+                searchRequestBuilder.setFetchSource(responseFields, null);
+            }
+
+            // rescorer
+            buildRescorer(queryHelper, queryFieldConfig, fessConfig);
+
+            // sort
+            buildSort(queryContext, queryFieldConfig, fessConfig);
+
+            // highlighting
+            if (highlightInfo != null) {
+                buildHighlighter(queryHelper, queryFieldConfig, fessConfig);
+            }
+
+            // facets
+            if (facetInfo != null) {
+                buildFacet(queryHelper, queryFieldConfig, fessConfig);
+            }
+
+            if (!SearchRequestType.ADMIN_SEARCH.equals(searchRequestType) && !isScroll && fessConfig.isResultCollapsed()
+                    && similarDocHash == null) {
+                searchRequestBuilder.setCollapse(getCollapseBuilder(fessConfig));
+            }
+
+            searchRequestBuilder.setQuery(queryContext.getQueryBuilder());
+            return true;
+        }
+
+        /**
+         * Builds the minimum score configuration.
+         *
+         * @param fessConfig the Fess configuration
+         */
+        protected void buildMinScore(final FessConfig fessConfig) {
+            if (minScore != null) {
+                searchRequestBuilder.setMinScore(minScore);
+            }
+        }
+
+        /**
+         * Builds the track total hits configuration.
+         *
+         * <p>Turning the total off is not supported. OpenSearch answers such a request by leaving
+         * {@code hits.total} out of the response, and the record count derived from it is what the
+         * pager, the result screen and the {@code record_count} of the API are all built on: without
+         * it the response handler reads a null total and every search comes back empty. The value is
+         * refused wherever it is given, as a search parameter and in
+         * {@code query.track.total.hits} alike.</p>
+         *
+         * @param fessConfig the Fess configuration
+         * @throws InvalidQueryException if the total was asked not to be tracked
+         */
+        protected void buildTrackTotalHits(final FessConfig fessConfig) {
+            if (isScroll) {
+                return;
+            }
+            if (StringUtil.isNotBlank(trackTotalHits)) {
+                if (Constants.FALSE.equalsIgnoreCase(trackTotalHits)) {
+                    throw unsupportedTrackTotalHits(trackTotalHits);
+                }
+                if (Constants.TRUE.equalsIgnoreCase(trackTotalHits)) {
+                    searchRequestBuilder.setTrackTotalHits(true);
+                    return;
+                }
+                try {
+                    searchRequestBuilder.setTrackTotalHitsUpTo(Integer.parseInt(trackTotalHits));
+                    return;
+                } catch (final NumberFormatException e) {
+                    // ignore
+                }
+            }
+            final Object trackTotalHitsValue = fessConfig.getQueryTrackTotalHitsValue();
+            if (Boolean.FALSE.equals(trackTotalHitsValue)) {
+                throw unsupportedTrackTotalHits(fessConfig.getQueryTrackTotalHits());
+            }
+            if (trackTotalHitsValue instanceof Boolean) {
+                searchRequestBuilder.setTrackTotalHits((Boolean) trackTotalHitsValue);
+            } else if (trackTotalHitsValue instanceof Number) {
+                searchRequestBuilder.setTrackTotalHitsUpTo(((Number) trackTotalHitsValue).intValue());
+            }
+        }
+
+        /**
+         * Builds the failure for a track total hits value that would leave the response without a
+         * total.
+         *
+         * @param value the value that was given
+         * @return the exception to throw
+         */
+        protected InvalidQueryException unsupportedTrackTotalHits(final String value) {
+            return new InvalidQueryException(
+                    messages -> messages.addErrorsInvalidQueryUnsupportedTrackTotalHits(UserMessages.GLOBAL_PROPERTY_KEY, value),
+                    "Unsupported track_total_hits: " + value);
+        }
+
+        /**
+         * Builds the facet aggregations.
+         *
+         * @param queryHelper the query helper
+         * @param queryFieldConfig the query field configuration
+         * @param fessConfig the Fess configuration
+         * @throws InvalidQueryException if a requested facet field is not allowed by
+         *         {@code query.additional.facet.fields}
+         */
+        protected void buildFacet(final QueryHelper queryHelper, final QueryFieldConfig queryFieldConfig, final FessConfig fessConfig) {
+            stream(facetInfo.field).of(stream -> stream.forEach(f -> {
+                if (!queryFieldConfig.isFacetField(f)) {
+                    // InvalidQueryException (not SearchQueryException) so that the caller sees a
+                    // query error: RankFusionProcessor swallows everything else into an empty
+                    // result list, which turns a misconfigured facet field into a search that
+                    // silently returns no documents at all.
+                    throw new InvalidQueryException(
+                            messages -> messages.addErrorsInvalidQueryUnsupportedFacetField(UserMessages.GLOBAL_PROPERTY_KEY, f),
+                            "Unsupported facet field: " + f);
+                }
+                final String encodedField = BaseEncoding.base64().encode(f.getBytes(StandardCharsets.UTF_8));
+                final TermsAggregationBuilder termsBuilder =
+                        AggregationBuilders.terms(Constants.FACET_FIELD_PREFIX + encodedField).field(f);
+                termsBuilder.order(facetInfo.getBucketOrder());
+                if (facetInfo.size != null) {
+                    final int maxFacetSize = fessConfig.getQueryFacetFieldsSizeMaxOrDefault();
+                    termsBuilder.size(clampFacetSize(facetInfo.size, maxFacetSize));
+                }
+                if (facetInfo.minDocCount != null) {
+                    termsBuilder
+                            .minDocCount(clampMinDocCount(facetInfo.minDocCount, fessConfig.getQueryFacetFieldsMinDocCountMaxOrDefault()));
+                }
+                if (facetInfo.missing != null) {
+                    termsBuilder.missing(facetInfo.missing);
+                }
+                searchRequestBuilder.addAggregation(termsBuilder);
+            }));
+            stream(facetInfo.query).of(stream -> stream.forEach(fq -> {
+                final QueryContext facetContext = new QueryContext(fq, false);
+                queryHelper.buildBaseQuery(facetContext, c -> {});
+                final String encodedFacetQuery = BaseEncoding.base64().encode(fq.getBytes(StandardCharsets.UTF_8));
+                final FilterAggregationBuilder filterBuilder =
+                        AggregationBuilders.filter(Constants.FACET_QUERY_PREFIX + encodedFacetQuery, facetContext.getQueryBuilder());
+                searchRequestBuilder.addAggregation(filterBuilder);
+            }));
+        }
+
+        /**
+         * Builds the highlighting configuration.
+         *
+         * @param queryHelper the query helper
+         * @param queryFieldConfig the query field configuration
+         * @param fessConfig the Fess configuration
+         */
+        protected void buildHighlighter(final QueryHelper queryHelper, final QueryFieldConfig queryFieldConfig,
+                final FessConfig fessConfig) {
+            final String highlighterType = highlightInfo.getType();
+            final int fragmentSize = highlightInfo.getFragmentSize();
+            final int numOfFragments = highlightInfo.getNumOfFragments();
+            final int fragmentOffset = highlightInfo.getFragmentOffset();
+            final char[] boundaryChars = fessConfig.getQueryHighlightBoundaryCharsAsArray();
+            final int boundaryMaxScan = fessConfig.getQueryHighlightBoundaryMaxScanAsInteger();
+            final String boundaryScannerType = fessConfig.getQueryHighlightBoundaryScanner();
+            final boolean forceSource = fessConfig.isQueryHighlightForceSource();
+            final String fragmenter = fessConfig.getQueryHighlightFragmenter();
+            final int noMatchSize = fessConfig.getQueryHighlightNoMatchSizeAsInteger();
+            final String order = fessConfig.getQueryHighlightOrder();
+            final int phraseLimit = fessConfig.getQueryHighlightPhraseLimitAsInteger();
+            final String encoder = fessConfig.getQueryHighlightEncoder();
+            final HighlightBuilder highlightBuilder = new HighlightBuilder();
+            final String[] preTags = highlightInfo.getPreTags();
+            final String[] postTags = highlightInfo.getPostTags();
+            if (preTags != null) {
+                highlightBuilder.preTags(preTags);
+            }
+            if (postTags != null) {
+                highlightBuilder.postTags(postTags);
+            }
+            queryFieldConfig.highlightedFields(
+                    stream -> stream.forEach(hf -> highlightBuilder.field(new HighlightBuilder.Field(hf).highlighterType(highlighterType)
+                            .fragmentSize(fragmentSize)
+                            .numOfFragments(numOfFragments)
+                            .boundaryChars(boundaryChars)
+                            .boundaryMaxScan(boundaryMaxScan)
+                            .boundaryScannerType(boundaryScannerType)
+                            .forceSource(forceSource)
+                            .fragmenter(fragmenter)
+                            .fragmentOffset(fragmentOffset)
+                            .noMatchSize(noMatchSize)
+                            .order(order)
+                            .phraseLimit(phraseLimit)).encoder(encoder)));
+            searchRequestBuilder.highlighter(highlightBuilder);
+        }
+
+        /**
+         * Builds the sort configuration.
+         *
+         * @param queryContext the query context
+         * @param queryFieldConfig the query field configuration
+         * @param fessConfig the Fess configuration
+         */
+        protected void buildSort(final QueryContext queryContext, final QueryFieldConfig queryFieldConfig, final FessConfig fessConfig) {
+            queryContext.sortBuilders().forEach(sortBuilder -> searchRequestBuilder.addSort(sortBuilder));
+        }
+
+        /**
+         * Builds the rescorer configuration.
+         *
+         * @param queryHelper the query helper
+         * @param queryFieldConfig the query field configuration
+         * @param fessConfig the Fess configuration
+         */
+        protected void buildRescorer(final QueryHelper queryHelper, final QueryFieldConfig queryFieldConfig, final FessConfig fessConfig) {
+            stream(queryHelper.getRescorers(condition())).of(stream -> stream.forEach(searchRequestBuilder::addRescorer));
+        }
+
+        /**
+         * Builds the query context with all search parameters.
+         *
+         * @param queryHelper the query helper
+         * @param queryFieldConfig the query field configuration
+         * @param fessConfig the Fess configuration
+         * @return the built query context
+         */
+        protected QueryContext buildQueryContext(final QueryHelper queryHelper, final QueryFieldConfig queryFieldConfig,
+                final FessConfig fessConfig) {
+            return queryHelper.build(searchRequestType, query, context -> {
+                if (SearchRequestType.ADMIN_SEARCH.equals(searchRequestType)) {
+                    context.skipRoleQuery();
+                } else if (similarDocHash != null) {
+                    final DocumentHelper documentHelper = ComponentUtil.getDocumentHelper();
+                    context.addQuery(boolQuery -> {
+                        boolQuery.filter(QueryBuilders.termQuery(fessConfig.getIndexFieldContentMinhashBits(),
+                                documentHelper.decodeSimilarDocHash(similarDocHash)));
+                    });
+                }
+
+                if (geoInfo != null && geoInfo.toQueryBuilder() != null) {
+                    context.addQuery(boolQuery -> boolQuery.filter(geoInfo.toQueryBuilder()));
+                }
+            });
+        }
+
+        /**
+         * Gets the collapse builder for result grouping.
+         *
+         * @param fessConfig the Fess configuration
+         * @return the collapse builder
+         */
+        protected CollapseBuilder getCollapseBuilder(final FessConfig fessConfig) {
+            final InnerHitBuilder innerHitBuilder = new InnerHitBuilder().setName(fessConfig.getQueryCollapseInnerHitsName())
+                    .setSize(fessConfig.getQueryCollapseInnerHitsSizeAsInteger());
+            fessConfig.getQueryCollapseInnerHitsSortBuilders()
+                    .ifPresent(builders -> stream(builders).of(stream -> stream.forEach(innerHitBuilder::addSort)));
+            return new CollapseBuilder(fessConfig.getIndexFieldContentMinhashBits())
+                    .setMaxConcurrentGroupRequests(fessConfig.getQueryCollapseMaxConcurrentGroupResultsAsInteger())
+                    .setInnerHits(innerHitBuilder);
+        }
+    }
+
+    /**
+     * Stores a document in the specified index.
+     *
+     * @param index the index name
+     * @param obj   the document object to store
+     * @return true if the document was stored successfully, false otherwise
+     * @throws SearchEngineClientException if the store operation fails
+     */
+    public boolean store(final String index, final Object obj) {
+        final FessConfig fessConfig = ComponentUtil.getFessConfig();
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> source = obj instanceof Map ? (Map<String, Object>) obj : BeanUtil.copyBeanToNewMap(obj);
+        final String id = (String) source.remove(fessConfig.getIndexFieldId());
+        source.remove(fessConfig.getIndexFieldVersion());
+        final Number seqNo = (Number) source.remove(fessConfig.getIndexFieldSeqNo());
+        final Number primaryTerm = (Number) source.remove(fessConfig.getIndexFieldPrimaryTerm());
+        IndexResponse response;
+        try {
+            if (id == null) {
+                // TODO throw Exception in next release
+                // create
+                response = client.prepareIndex()
+                        .setIndex(index)
+                        .setSource(new DocMap(source))
+                        .setRefreshPolicy(RefreshPolicy.IMMEDIATE)
+                        .setOpType(OpType.CREATE)
+                        .execute()
+                        .actionGet(fessConfig.getIndexIndexTimeout());
+            } else {
+                // create or update
+                final IndexRequestBuilder builder = client.prepareIndex()
+                        .setIndex(index)
+                        .setId(id)
+                        .setSource(new DocMap(source))
+                        .setRefreshPolicy(RefreshPolicy.IMMEDIATE)
+                        .setOpType(OpType.INDEX);
+                if (seqNo != null) {
+                    builder.setIfSeqNo(seqNo.longValue());
+                }
+                if (primaryTerm != null) {
+                    builder.setIfPrimaryTerm(primaryTerm.longValue());
+                }
+                response = builder.execute().actionGet(fessConfig.getIndexIndexTimeout());
+            }
+            final Result result = response.getResult();
+            return result == Result.CREATED || result == Result.UPDATED;
+        } catch (final OpenSearchException e) {
+            throw new SearchEngineClientException("Failed to store: " + obj, e);
+        }
+    }
+
+    /**
+     * Deletes a document from the specified index.
+     *
+     * @param index the index name
+     * @param id    the document ID
+     * @return true if the document was deleted successfully, false otherwise
+     */
+    public boolean delete(final String index, final String id) {
+        return delete(index, id, null, null);
+    }
+
+    /**
+     * Deletes a document from the specified index with optimistic concurrency control.
+     *
+     * @param index       the index name
+     * @param id          the document ID
+     * @param seqNo       the sequence number for optimistic concurrency control
+     * @param primaryTerm the primary term for optimistic concurrency control
+     * @return true if the document was deleted successfully, false otherwise
+     * @throws SearchEngineClientException if the delete operation fails
+     */
+    public boolean delete(final String index, final String id, final Number seqNo, final Number primaryTerm) {
+        try {
+            final DeleteRequestBuilder builder = client.prepareDelete().setIndex(index).setId(id).setRefreshPolicy(RefreshPolicy.IMMEDIATE);
+            if (seqNo != null) {
+                builder.setIfSeqNo(seqNo.longValue());
+            }
+            if (primaryTerm != null) {
+                builder.setIfPrimaryTerm(primaryTerm.longValue());
+            }
+            final DeleteResponse response = builder.execute().actionGet(ComponentUtil.getFessConfig().getIndexDeleteTimeout());
+            return response.getResult() == Result.DELETED;
+        } catch (final OpenSearchException e) {
+            throw new SearchEngineClientException("Failed to delete: " + index + "/" + id + "@" + seqNo + ":" + primaryTerm, e);
+        }
+    }
+
+    /**
+     * Sets the path to index configuration resources.
+     *
+     * @param indexConfigPath the path to index configuration resources
+     */
+    public void setIndexConfigPath(final String indexConfigPath) {
+        this.indexConfigPath = indexConfigPath;
+    }
+
+    /**
+     * Interface for defining search condition logic.
+     *
+     * @param <B> the type of request builder
+     */
+    public interface SearchCondition<B> {
+        /**
+         * Builds the search condition into the request builder.
+         *
+         * @param requestBuilder the request builder to configure
+         * @return true if the condition was successfully built, false otherwise
+         */
+        boolean build(B requestBuilder);
+    }
+
+    /**
+     * Interface for building search results from response data.
+     *
+     * @param <T> the result type
+     * @param <B> the request builder type
+     * @param <R> the response type
+     */
+    public interface SearchResult<T, B, R> {
+        /**
+         * Builds a result object from the request builder, execution time, and response.
+         *
+         * @param requestBuilder the request builder that was executed
+         * @param execTime       the execution time in milliseconds
+         * @param response       the optional response from the search engine
+         * @return the built result object
+         */
+        T build(B requestBuilder, long execTime, OptionalEntity<R> response);
+    }
+
+    /**
+     * Interface for creating entities from search response hits.
+     *
+     * @param <T> the entity type
+     * @param <R> the response type
+     * @param <H> the hit type
+     */
+    public interface EntityCreator<T, R, H> {
+        /**
+         * Creates an entity from a search response and hit.
+         *
+         * @param response the search response
+         * @param hit      the individual search hit
+         * @return the created entity
+         */
+        T build(R response, H hit);
+    }
+
+    /**
+     * Aborts startup unless the backend is OpenSearch 3.x or later.
+     *
+     * <p>Fess walks whole result sets -- document export, purge, label updates, backup, the
+     * scroll search API, suggest dictionary builds -- over a point in time ordered by a
+     * {@code _shard_doc} tiebreaker. That sort field is only implemented from OpenSearch 3.x;
+     * an earlier backend answers {@code 400 No mapping found for [_shard_doc] in order to sort
+     * on}. Worse, over HTTP a 400 on a request carrying a body does not surface as an error but
+     * hangs, because the client's socket timeout is disabled by default, so those jobs would
+     * stall rather than fail visibly.</p>
+     *
+     * <p>This used to log an error and carry on, on the grounds that search still worked and an
+     * operator might be mid-upgrade. That reasoning came from a time when the alternative was a
+     * bundled engine nobody chose; now that the search engine is always a server the operator
+     * installed and pointed Fess at, a version mismatch is a misconfiguration to fix before
+     * anything runs -- and failing at startup is far cheaper to diagnose than a scheduled job
+     * that hangs days later.</p>
+     *
+     * <p>A backend that cannot be reached at all is not treated as a mismatch: the type check is
+     * skipped and the connection failure surfaces on its own.</p>
+     */
+    protected void verifyEngineVersion() {
+        final EngineType engineType;
+        try {
+            engineType = getEngineInfo().getType();
+        } catch (final Exception e) {
+            logger.debug("Failed to detect the search engine type.", e);
+            return;
+        }
+        if (engineType == EngineType.OPENSEARCH3) {
+            return;
+        }
+        reportUnsupportedEngine(engineType);
+    }
+
+    /**
+     * Rejects a backend Fess cannot walk result sets on.
+     *
+     * @param engineType the engine the backend reported
+     * @throws FessSystemException always
+     */
+    protected void reportUnsupportedEngine(final EngineType engineType) {
+        throw new FessSystemException("The search engine reports " + engineType
+                + ", but Fess requires OpenSearch 3.x or later. Operations that walk every matching document "
+                + "(document export, purge, label update, backup, the scroll search API and suggest dictionary "
+                + "builds) sort by _shard_doc, which earlier engines do not implement; over HTTP they hang "
+                + "rather than report an error. Upgrade the search engine, or run bin/fess-setup install opensearch.");
+    }
+
+    /**
+     * Gets information about the search engine.
+     *
+     * @return the engine information
+     * @throws SearchEngineClientException if the client is not an HttpClient
+     */
+    public EngineInfo getEngineInfo() {
+        if (client instanceof final HttpClient httpClient) {
+            return httpClient.getEngineInfo();
+        }
+        throw new SearchEngineClientException("client is not HttpClient.");
+    }
+
+    //
+    // Fesen Client
+    //
+
+    /**
+     * Gets the thread pool used by the client.
+     *
+     * @return the thread pool
+     */
+    @Override
+    public ThreadPool threadPool() {
+        return client.threadPool();
+    }
+
+    /**
+     * Gets the admin client for cluster and index administration.
+     *
+     * @return the admin client
+     */
+    @Override
+    public AdminClient admin() {
+        return client.admin();
+    }
+
+    /**
+     * Indexes a document asynchronously.
+     *
+     * @param request the index request
+     * @return a future for the index response
+     */
+    @Override
+    public ActionFuture<IndexResponse> index(final IndexRequest request) {
+        return client.index(request);
+    }
+
+    /**
+     * Indexes a document asynchronously with a callback.
+     *
+     * @param request  the index request
+     * @param listener the response listener
+     */
+    @Override
+    public void index(final IndexRequest request, final ActionListener<IndexResponse> listener) {
+        client.index(request, listener);
+    }
+
+    /**
+     * Prepares an index request builder.
+     *
+     * @return the index request builder
+     */
+    @Override
+    public IndexRequestBuilder prepareIndex() {
+        return client.prepareIndex();
+    }
+
+    /**
+     * Updates a document asynchronously.
+     *
+     * @param request the update request
+     * @return a future for the update response
+     */
+    @Override
+    public ActionFuture<UpdateResponse> update(final UpdateRequest request) {
+        return client.update(request);
+    }
+
+    /**
+     * Updates a document asynchronously with a callback.
+     *
+     * @param request  the update request
+     * @param listener the response listener
+     */
+    @Override
+    public void update(final UpdateRequest request, final ActionListener<UpdateResponse> listener) {
+        client.update(request, listener);
+    }
+
+    /**
+     * Prepares an update request builder.
+     *
+     * @return the update request builder
+     */
+    @Override
+    public UpdateRequestBuilder prepareUpdate() {
+        return client.prepareUpdate();
+    }
+
+    /**
+     * Prepares an update request builder for a specific document.
+     *
+     * @param index the index name
+     * @param id    the document ID
+     * @return the update request builder
+     */
+    @Override
+    public UpdateRequestBuilder prepareUpdate(final String index, final String id) {
+        return client.prepareUpdate(index, id);
+    }
+
+    /**
+     * Prepares an index request builder for a specific index.
+     *
+     * @param index the index name
+     * @return the index request builder
+     */
+    @Override
+    public IndexRequestBuilder prepareIndex(final String index) {
+        return client.prepareIndex(index);
+    }
+
+    /**
+     * Deletes a document asynchronously.
+     *
+     * @param request the delete request
+     * @return a future for the delete response
+     */
+    @Override
+    public ActionFuture<DeleteResponse> delete(final DeleteRequest request) {
+        return client.delete(request);
+    }
+
+    /**
+     * Deletes a document asynchronously with a callback.
+     *
+     * @param request  the delete request
+     * @param listener the response listener
+     */
+    @Override
+    public void delete(final DeleteRequest request, final ActionListener<DeleteResponse> listener) {
+        client.delete(request, listener);
+    }
+
+    /**
+     * Prepares a delete request builder.
+     *
+     * @return the delete request builder
+     */
+    @Override
+    public DeleteRequestBuilder prepareDelete() {
+        return client.prepareDelete();
+    }
+
+    /**
+     * Prepares a delete request builder for a specific document.
+     *
+     * @param index the index name
+     * @param id    the document ID
+     * @return the delete request builder
+     */
+    @Override
+    public DeleteRequestBuilder prepareDelete(final String index, final String id) {
+        return client.prepareDelete(index, id);
+    }
+
+    /**
+     * Executes a bulk request asynchronously.
+     *
+     * @param request the bulk request
+     * @return a future for the bulk response
+     */
+    @Override
+    public ActionFuture<BulkResponse> bulk(final BulkRequest request) {
+        return client.bulk(request);
+    }
+
+    /**
+     * Executes a bulk request asynchronously with a callback.
+     *
+     * @param request  the bulk request
+     * @param listener the response listener
+     */
+    @Override
+    public void bulk(final BulkRequest request, final ActionListener<BulkResponse> listener) {
+        client.bulk(request, listener);
+    }
+
+    /**
+     * Prepares a bulk request builder.
+     *
+     * @return the bulk request builder
+     */
+    @Override
+    public BulkRequestBuilder prepareBulk() {
+        return client.prepareBulk();
+    }
+
+    /**
+     * Gets a document asynchronously.
+     *
+     * @param request the get request
+     * @return a future for the get response
+     */
+    @Override
+    public ActionFuture<GetResponse> get(final GetRequest request) {
+        return client.get(request);
+    }
+
+    /**
+     * Gets a document asynchronously with a callback.
+     *
+     * @param request  the get request
+     * @param listener the response listener
+     */
+    @Override
+    public void get(final GetRequest request, final ActionListener<GetResponse> listener) {
+        client.get(request, listener);
+    }
+
+    /**
+     * Prepares a get request builder.
+     *
+     * @return the get request builder
+     */
+    @Override
+    public GetRequestBuilder prepareGet() {
+        return client.prepareGet();
+    }
+
+    /**
+     * Prepares a get request builder for a specific document.
+     *
+     * @param index the index name
+     * @param id    the document ID
+     * @return the get request builder
+     */
+    @Override
+    public GetRequestBuilder prepareGet(final String index, final String id) {
+        return client.prepareGet(index, id);
+    }
+
+    /**
+     * Gets multiple documents asynchronously.
+     *
+     * @param request the multi-get request
+     * @return a future for the multi-get response
+     */
+    @Override
+    public ActionFuture<MultiGetResponse> multiGet(final MultiGetRequest request) {
+        return client.multiGet(request);
+    }
+
+    /**
+     * Gets multiple documents asynchronously with a callback.
+     *
+     * @param request  the multi-get request
+     * @param listener the response listener
+     */
+    @Override
+    public void multiGet(final MultiGetRequest request, final ActionListener<MultiGetResponse> listener) {
+        client.multiGet(request, listener);
+    }
+
+    /**
+     * Prepares a multi-get request builder.
+     *
+     * @return the multi-get request builder
+     */
+    @Override
+    public MultiGetRequestBuilder prepareMultiGet() {
+        return client.prepareMultiGet();
+    }
+
+    /**
+     * Executes a search request asynchronously.
+     *
+     * @param request the search request
+     * @return a future for the search response
+     */
+    @Override
+    public ActionFuture<SearchResponse> search(final SearchRequest request) {
+        return client.search(request);
+    }
+
+    /**
+     * Executes a search request asynchronously with a callback.
+     *
+     * @param request  the search request
+     * @param listener the response listener
+     */
+    @Override
+    public void search(final SearchRequest request, final ActionListener<SearchResponse> listener) {
+        client.search(request, listener);
+    }
+
+    /**
+     * Prepares a search request builder for specific indices.
+     *
+     * @param indices the indices to search
+     * @return the search request builder
+     */
+    @Override
+    public SearchRequestBuilder prepareSearch(final String... indices) {
+        return client.prepareSearch(indices);
+    }
+
+    /**
+     * Prepares a stream search request builder for specific indices.
+     *
+     * @param indices the indices to search
+     * @return the search request builder
+     */
+    @Override
+    public SearchRequestBuilder prepareStreamSearch(final String... indices) {
+        return client.prepareStreamSearch(indices);
+    }
+
+    /**
+     * Executes a search scroll request asynchronously.
+     *
+     * @param request the search scroll request
+     * @return a future for the search response
+     */
+    @Override
+    public ActionFuture<SearchResponse> searchScroll(final SearchScrollRequest request) {
+        return client.searchScroll(request);
+    }
+
+    /**
+     * Executes a search scroll request asynchronously with a callback.
+     *
+     * @param request  the search scroll request
+     * @param listener the response listener
+     */
+    @Override
+    public void searchScroll(final SearchScrollRequest request, final ActionListener<SearchResponse> listener) {
+        client.searchScroll(request, listener);
+    }
+
+    /**
+     * Prepares a search scroll request builder.
+     *
+     * @param scrollId the scroll ID
+     * @return the search scroll request builder
+     */
+    @Override
+    public SearchScrollRequestBuilder prepareSearchScroll(final String scrollId) {
+        return client.prepareSearchScroll(scrollId);
+    }
+
+    /**
+     * Executes a multi-search request asynchronously.
+     *
+     * @param request the multi-search request
+     * @return a future for the multi-search response
+     */
+    @Override
+    public ActionFuture<MultiSearchResponse> multiSearch(final MultiSearchRequest request) {
+        return client.multiSearch(request);
+    }
+
+    /**
+     * Executes a multi-search request asynchronously with a callback.
+     *
+     * @param request  the multi-search request
+     * @param listener the response listener
+     */
+    @Override
+    public void multiSearch(final MultiSearchRequest request, final ActionListener<MultiSearchResponse> listener) {
+        client.multiSearch(request, listener);
+    }
+
+    /**
+     * Prepares a multi-search request builder.
+     *
+     * @return the multi-search request builder
+     */
+    @Override
+    public MultiSearchRequestBuilder prepareMultiSearch() {
+        return client.prepareMultiSearch();
+    }
+
+    /**
+     * Prepares an explain request builder for a specific document.
+     *
+     * @param index the index name
+     * @param id    the document ID
+     * @return the explain request builder
+     */
+    @Override
+    public ExplainRequestBuilder prepareExplain(final String index, final String id) {
+        return client.prepareExplain(index, id);
+    }
+
+    /**
+     * Executes an explain request asynchronously.
+     *
+     * @param request the explain request
+     * @return a future for the explain response
+     */
+    @Override
+    public ActionFuture<ExplainResponse> explain(final ExplainRequest request) {
+        return client.explain(request);
+    }
+
+    /**
+     * Executes an explain request asynchronously with a callback.
+     *
+     * @param request  the explain request
+     * @param listener the response listener
+     */
+    @Override
+    public void explain(final ExplainRequest request, final ActionListener<ExplainResponse> listener) {
+        client.explain(request, listener);
+    }
+
+    /**
+     * Prepares a clear scroll request builder.
+     *
+     * @return the clear scroll request builder
+     */
+    @Override
+    public ClearScrollRequestBuilder prepareClearScroll() {
+        return client.prepareClearScroll();
+    }
+
+    /**
+     * Clears scroll contexts asynchronously.
+     *
+     * @param request the clear scroll request
+     * @return a future for the clear scroll response
+     */
+    @Override
+    public ActionFuture<ClearScrollResponse> clearScroll(final ClearScrollRequest request) {
+        return client.clearScroll(request);
+    }
+
+    /**
+     * Clears scroll contexts asynchronously with a callback.
+     *
+     * @param request  the clear scroll request
+     * @param listener the response listener
+     */
+    @Override
+    public void clearScroll(final ClearScrollRequest request, final ActionListener<ClearScrollResponse> listener) {
+        client.clearScroll(request, listener);
+    }
+
+    /**
+     * Gets the client settings.
+     *
+     * @return the client settings
+     */
+    @Override
+    public Settings settings() {
+        return client.settings();
+    }
+
+    /**
+     * Gets term vectors for a document asynchronously.
+     *
+     * @param request the term vectors request
+     * @return a future for the term vectors response
+     */
+    @Override
+    public ActionFuture<TermVectorsResponse> termVectors(final TermVectorsRequest request) {
+        return client.termVectors(request);
+    }
+
+    /**
+     * Gets term vectors for a document asynchronously with a callback.
+     *
+     * @param request  the term vectors request
+     * @param listener the response listener
+     */
+    @Override
+    public void termVectors(final TermVectorsRequest request, final ActionListener<TermVectorsResponse> listener) {
+        client.termVectors(request, listener);
+    }
+
+    /**
+     * Prepares a term vectors request builder.
+     *
+     * @return the term vectors request builder
+     */
+    @Override
+    public TermVectorsRequestBuilder prepareTermVectors() {
+        return client.prepareTermVectors();
+    }
+
+    /**
+     * Prepares a term vectors request builder for a specific document.
+     *
+     * @param index the index name
+     * @param id    the document ID
+     * @return the term vectors request builder
+     */
+    @Override
+    public TermVectorsRequestBuilder prepareTermVectors(final String index, final String id) {
+        return client.prepareTermVectors(index, id);
+    }
+
+    /**
+     * Gets term vectors for multiple documents asynchronously.
+     *
+     * @param request the multi-term vectors request
+     * @return a future for the multi-term vectors response
+     */
+    @Override
+    public ActionFuture<MultiTermVectorsResponse> multiTermVectors(final MultiTermVectorsRequest request) {
+        return client.multiTermVectors(request);
+    }
+
+    /**
+     * Gets term vectors for multiple documents asynchronously with a callback.
+     *
+     * @param request  the multi-term vectors request
+     * @param listener the response listener
+     */
+    @Override
+    public void multiTermVectors(final MultiTermVectorsRequest request, final ActionListener<MultiTermVectorsResponse> listener) {
+        client.multiTermVectors(request, listener);
+    }
+
+    /**
+     * Prepares a multi-term vectors request builder.
+     *
+     * @return the multi-term vectors request builder
+     */
+    @Override
+    public MultiTermVectorsRequestBuilder prepareMultiTermVectors() {
+        return client.prepareMultiTermVectors();
+    }
+
+    /**
+     * Sets the batch size for update operations.
+     *
+     * @param sizeForUpdate the batch size for updates
+     */
+    public void setSizeForUpdate(final int sizeForUpdate) {
+        this.sizeForUpdate = sizeForUpdate;
+    }
+
+    /**
+     * Sets the scroll timeout for update operations.
+     *
+     * @param scrollForUpdate the scroll timeout string
+     */
+    public void setScrollForUpdate(final String scrollForUpdate) {
+        this.scrollForUpdate = scrollForUpdate;
+    }
+
+    /**
+     * Sets the batch size for delete operations.
+     *
+     * @param sizeForDelete the batch size for deletes
+     */
+    public void setSizeForDelete(final int sizeForDelete) {
+        this.sizeForDelete = sizeForDelete;
+    }
+
+    /**
+     * Sets the scroll timeout for delete operations.
+     *
+     * @param scrollForDelete the scroll timeout string
+     */
+    public void setScrollForDelete(final String scrollForDelete) {
+        this.scrollForDelete = scrollForDelete;
+    }
+
+    /**
+     * Sets the scroll timeout for search operations.
+     *
+     * @param scrollForSearch the scroll timeout string
+     */
+    public void setScrollForSearch(final String scrollForSearch) {
+        this.scrollForSearch = scrollForSearch;
+    }
+
+    /**
+     * Sets the maximum retry attempts for configuration synchronization status checks.
+     *
+     * @param maxConfigSyncStatusRetry the maximum retry attempts
+     */
+    public void setMaxConfigSyncStatusRetry(final int maxConfigSyncStatusRetry) {
+        this.maxConfigSyncStatusRetry = maxConfigSyncStatusRetry;
+    }
+
+    /**
+     * Sets the maximum retry attempts for search engine status checks.
+     *
+     * @param maxEsStatusRetry the maximum retry attempts
+     */
+    public void setMaxEsStatusRetry(final int maxEsStatusRetry) {
+        this.maxEsStatusRetry = maxEsStatusRetry;
+    }
+
+    /**
+     * Creates a client filtered with additional headers.
+     *
+     * @param headers the headers to add to requests
+     * @return the filtered client
+     */
+    @Override
+    public Client filterWithHeader(final Map<String, String> headers) {
+        return client.filterWithHeader(headers);
+    }
+
+    /**
+     * Executes an action asynchronously.
+     *
+     * @param <Request>  the request type
+     * @param <Response> the response type
+     * @param action     the action to execute
+     * @param request    the action request
+     * @return a future for the action response
+     */
+    @Override
+    public <Request extends ActionRequest, Response extends ActionResponse> ActionFuture<Response> execute(
+            final ActionType<Response> action, final Request request) {
+        return client.execute(action, request);
+    }
+
+    /**
+     * Executes an action asynchronously with a callback.
+     *
+     * @param <Request>  the request type
+     * @param <Response> the response type
+     * @param action     the action to execute
+     * @param request    the action request
+     * @param listener   the response listener
+     */
+    @Override
+    public <Request extends ActionRequest, Response extends ActionResponse> void execute(final ActionType<Response> action,
+            final Request request, final ActionListener<Response> listener) {
+        client.execute(action, request, listener);
+    }
+
+    /**
+     * Prepares a field capabilities request builder.
+     *
+     * @param indices the indices to check field capabilities for
+     * @return the field capabilities request builder
+     */
+    @Override
+    public FieldCapabilitiesRequestBuilder prepareFieldCaps(final String... indices) {
+        return client.prepareFieldCaps(indices);
+    }
+
+    /**
+     * Gets field capabilities asynchronously.
+     *
+     * @param request the field capabilities request
+     * @return a future for the field capabilities response
+     */
+    @Override
+    public ActionFuture<FieldCapabilitiesResponse> fieldCaps(final FieldCapabilitiesRequest request) {
+        return client.fieldCaps(request);
+    }
+
+    /**
+     * Gets field capabilities asynchronously with a callback.
+     *
+     * @param request  the field capabilities request
+     * @param listener the response listener
+     */
+    @Override
+    public void fieldCaps(final FieldCapabilitiesRequest request, final ActionListener<FieldCapabilitiesResponse> listener) {
+        client.fieldCaps(request, listener);
+    }
+
+    /**
+     * Prepares a bulk request builder with a global index.
+     *
+     * @param globalIndex the global index for all operations
+     * @return the bulk request builder
+     */
+    @Override
+    public BulkRequestBuilder prepareBulk(final String globalIndex) {
+        return client.prepareBulk(globalIndex);
+    }
+
+    /**
+     * Creates a point-in-time context asynchronously.
+     *
+     * @param createPITRequest the create PIT request
+     * @param listener         the response listener
+     */
+    @Override
+    public void createPit(final CreatePitRequest createPITRequest, final ActionListener<CreatePitResponse> listener) {
+        client.createPit(createPITRequest, listener);
+    }
+
+    /**
+     * Deletes point-in-time contexts asynchronously.
+     *
+     * @param deletePITRequest the delete PITs request
+     * @param listener         the response listener
+     */
+    @Override
+    public void deletePits(final DeletePitRequest deletePITRequest, final ActionListener<DeletePitResponse> listener) {
+        client.deletePits(deletePITRequest, listener);
+    }
+
+    /**
+     * Gets all point-in-time contexts asynchronously.
+     *
+     * @param getAllPitNodesRequest the get all PITs request
+     * @param listener              the response listener
+     */
+    @Override
+    public void getAllPits(final GetAllPitNodesRequest getAllPitNodesRequest, final ActionListener<GetAllPitNodesResponse> listener) {
+        client.getAllPits(getAllPitNodesRequest, listener);
+    }
+
+    /**
+     * Searches a view asynchronously (not implemented).
+     *
+     * @param request  the search view request
+     * @param listener the response listener
+     * @throws UnsupportedOperationException always thrown as this operation is not implemented
+     */
+    @Override
+    public void searchView(final org.codelibs.fesen.opensearch.action.admin.indices.view.SearchViewAction.Request request,
+            final ActionListener<SearchResponse> listener) {
+        throw new UnsupportedOperationException("Not implemented yet");
+    }
+
+    /**
+     * Searches a view asynchronously (not implemented).
+     *
+     * @param request the search view request
+     * @return never returns as this operation is not implemented
+     * @throws UnsupportedOperationException always thrown as this operation is not implemented
+     */
+    @Override
+    public ActionFuture<SearchResponse> searchView(
+            final org.codelibs.fesen.opensearch.action.admin.indices.view.SearchViewAction.Request request) {
+        throw new UnsupportedOperationException("Not implemented yet");
+    }
+
+    /**
+     * Lists view names asynchronously (not implemented).
+     *
+     * @param request  the list view names request
+     * @param listener the response listener
+     * @throws UnsupportedOperationException always thrown as this operation is not implemented
+     */
+    @Override
+    public void listViewNames(final org.codelibs.fesen.opensearch.action.admin.indices.view.ListViewNamesAction.Request request,
+            final ActionListener<org.codelibs.fesen.opensearch.action.admin.indices.view.ListViewNamesAction.Response> listener) {
+        throw new UnsupportedOperationException("Not implemented yet");
+    }
+
+    /**
+     * Lists view names asynchronously (not implemented).
+     *
+     * @param request the list view names request
+     * @return never returns as this operation is not implemented
+     * @throws UnsupportedOperationException always thrown as this operation is not implemented
+     */
+    @Override
+    public ActionFuture<org.codelibs.fesen.opensearch.action.admin.indices.view.ListViewNamesAction.Response> listViewNames(
+            final org.codelibs.fesen.opensearch.action.admin.indices.view.ListViewNamesAction.Request request) {
+        throw new UnsupportedOperationException("Not implemented yet");
+    }
+
+    /**
+     * Clamps the facet size to a valid non-negative value not exceeding the configured maximum.
+     *
+     * @param size the requested facet size
+     * @param max  the maximum allowed facet size
+     * @return the clamped facet size
+     */
+    static int clampFacetSize(final int size, final int max) {
+        if (size < 0) {
+            return 0;
+        }
+        return Math.min(size, max);
+    }
+
+    /**
+     * Clamps the minimum document count to a valid non-negative value not exceeding the configured maximum.
+     *
+     * @param minDocCount the requested minimum document count
+     * @param max         the maximum allowed minimum document count
+     * @return the clamped minimum document count
+     */
+    static long clampMinDocCount(final long minDocCount, final long max) {
+        if (minDocCount < 0L) {
+            return 0L;
+        }
+        return Math.min(minDocCount, max);
+    }
+}

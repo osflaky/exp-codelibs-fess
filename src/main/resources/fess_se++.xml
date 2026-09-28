@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE components PUBLIC "-//DBFLUTE//DTD LastaDi 1.0//EN"
+	"http://dbflute.org/meta/lastadi10.dtd">
+<components>
+	<component name="javaScriptEngine"
+		class="org.codelibs.fess.script.javascript.JavaScriptEngine">
+		<!--
+		<property name="scriptCacheSize">1000</property>
+		<property name="maxScriptLogLength">200</property>
+		-->
+		<postConstruct name="init"></postConstruct>
+		<postConstruct name="register"></postConstruct>
+	</component>
+</components>

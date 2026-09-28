@@ -1,0 +1,616 @@
+/*
+ * Copyright 2012-2025 CodeLibs Project and the Others.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND,
+ * either express or implied. See the License for the specific language
+ * governing permissions and limitations under the License.
+ */
+package org.codelibs.fess.app.web.admin.general;
+
+import static org.codelibs.core.stream.StreamUtil.stream;
+
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+import org.codelibs.core.beans.util.BeanUtil;
+import org.codelibs.core.lang.StringUtil;
+import org.codelibs.core.misc.DynamicProperties;
+import org.codelibs.fess.Constants;
+import org.codelibs.fess.annotation.Secured;
+import org.codelibs.fess.app.web.base.FessAdminAction;
+import org.codelibs.fess.helper.SystemHelper;
+import org.codelibs.fess.llm.LlmClient;
+import org.codelibs.fess.llm.LlmClientManager;
+import org.codelibs.fess.mylasta.direction.FessConfig;
+import org.codelibs.fess.mylasta.mail.TestmailPostcard;
+import org.codelibs.fess.util.ComponentUtil;
+import org.lastaflute.core.mail.Postbox;
+import org.lastaflute.web.Execute;
+import org.lastaflute.web.response.HtmlResponse;
+import org.lastaflute.web.ruts.process.ActionRuntime;
+
+import jakarta.annotation.Resource;
+
+/**
+ * Admin action for General settings.
+ *
+ */
+public class AdminGeneralAction extends FessAdminAction {
+
+    /**
+     * Default constructor.
+     */
+    public AdminGeneralAction() {
+    }
+
+    /** The role name for general settings administration. */
+    public static final String ROLE = "admin-general";
+
+    private static final String DUMMY_PASSWORD = "**********";
+
+    /**
+     * The {@code sso.type} value that selects the SPNEGO provider. {@link org.codelibs.fess.sso.SsoManager}
+     * resolves the provider by looking up a component named {@code ssoType + "Authenticator"}, so this
+     * literal is the identifier and there is no constant for it elsewhere.
+     */
+    private static final String SSO_TYPE_SPNEGO = "spnego";
+
+    private static final Logger logger = LogManager.getLogger(AdminGeneralAction.class);
+
+    // ===================================================================================
+    //                                                                           Attribute
+    //                                                                           =========
+    /** System properties for configuration management. */
+    @Resource
+    protected DynamicProperties systemProperties;
+
+    // ===================================================================================
+    //                                                                               Hook
+    //                                                                              ======
+    @Override
+    protected void setupHtmlData(final ActionRuntime runtime) {
+        super.setupHtmlData(runtime);
+        runtime.registerData("helpLink", systemHelper.getHelpLink(fessConfig.getOnlineHelpNameGeneral()));
+        runtime.registerData("dayItems", getDayItems());
+        final boolean ragEnabled = isRagSectionVisible();
+        runtime.registerData("ragEnabled", ragEnabled);
+        if (ragEnabled) {
+            runtime.registerData("ragLlmNameItems", getRagLlmNameItems());
+        }
+    }
+
+    @Override
+    protected String getActionRole() {
+        return ROLE;
+    }
+
+    // ===================================================================================
+    //
+
+    /**
+     * Displays the general settings index page.
+     *
+     * @return HTML response for the general settings page
+     */
+    @Execute
+    @Secured({ ROLE, ROLE + VIEW })
+    public HtmlResponse index() {
+        saveToken();
+        return asHtml(path_AdminGeneral_AdminGeneralJsp).useForm(EditForm.class, setup -> {
+            setup.setup(form -> {
+                updateForm(fessConfig, form);
+            });
+        });
+    }
+
+    /**
+     * Sends a test mail using the provided notification settings.
+     *
+     * @param form the mail form containing notification settings
+     * @return HTML response after sending test mail
+     */
+    @Execute
+    @Secured({ ROLE })
+    public HtmlResponse sendmail(final MailForm form) {
+        validate(form, messages -> {}, () -> asHtml(path_AdminGeneral_AdminGeneralJsp));
+
+        final String[] toAddresses = form.notificationTo.split(",");
+        final Map<String, Object> dataMap = new HashMap<>();
+        dataMap.put("hostname", systemHelper.getHostname());
+
+        final FessConfig fessConfig = ComponentUtil.getFessConfig();
+        final Postbox postbox = ComponentUtil.getComponent(Postbox.class);
+        try {
+            TestmailPostcard.droppedInto(postbox, postcard -> {
+                postcard.setFrom(fessConfig.getMailFromAddress(), fessConfig.getMailFromName());
+                postcard.addReplyTo(fessConfig.getMailReturnPath());
+                stream(toAddresses).of(stream -> stream.forEach(address -> {
+                    postcard.addTo(address);
+                }));
+                BeanUtil.copyMapToBean(dataMap, postcard);
+            });
+            saveInfo(messages -> messages.addSuccessSendTestmail(GLOBAL));
+            updateProperty(Constants.NOTIFICATION_TO_PROPERTY, form.notificationTo);
+            systemProperties.store();
+        } catch (final Exception e) {
+            logger.warn("Failed to send a test mail.", e);
+            saveError(messages -> messages.addErrorsFailedToSendTestmail(GLOBAL));
+        }
+
+        return redirectByParam(AdminGeneralAction.class, "notificationTo", form.notificationTo);
+    }
+
+    /**
+     * Updates the general system configuration settings.
+     *
+     * @param form the edit form containing updated settings
+     * @return HTML response after updating settings
+     */
+    @Execute
+    @Secured({ ROLE })
+    public HtmlResponse update(final EditForm form) {
+        validate(form, messages -> {
+            if (isSpnegoNtlmPromptUnsupported(form)) {
+                messages.addErrorsSpnegoPromptNtlmRequiresBasic("spnegoPromptNtlm");
+            }
+        }, () -> asHtml(path_AdminGeneral_AdminGeneralJsp));
+        verifyToken(() -> asHtml(path_AdminGeneral_AdminGeneralJsp));
+
+        updateConfig(fessConfig, form);
+        saveInfo(messages -> messages.addSuccessUpdateCrawlerParams(GLOBAL));
+        return redirect(getClass());
+    }
+
+    /**
+     * Updates the Fess configuration with values from the form.
+     *
+     * @param fessConfig the Fess configuration to update
+     * @param form the form containing new configuration values
+     */
+    public static void updateConfig(final FessConfig fessConfig, final EditForm form) {
+        fessConfig.setLoginRequired(isCheckboxEnabled(form.loginRequired));
+        if (isResultCollapsedEditable(fessConfig)) {
+            fessConfig.setResultCollapsed(isCheckboxEnabled(form.resultCollapsed));
+        }
+        fessConfig.setLoginLinkEnabled(isCheckboxEnabled(form.loginLink));
+        fessConfig.setThumbnailEnabled(isCheckboxEnabled(form.thumbnail));
+        fessConfig.setIncrementalCrawling(isCheckboxEnabled(form.incrementalCrawling));
+        fessConfig.setDayForCleanup(form.dayForCleanup);
+        fessConfig.setCrawlingThreadCount(form.crawlingThreadCount);
+        fessConfig.setUserAgentName(form.crawlingUserAgent);
+        fessConfig.setSearchLog(isCheckboxEnabled(form.searchLog));
+        fessConfig.setUserInfo(isCheckboxEnabled(form.userInfo));
+        fessConfig.setUserFavorite(isCheckboxEnabled(form.userFavorite));
+        fessConfig.setWebApiJson(isCheckboxEnabled(form.webApiJson));
+        fessConfig.setSearchFileProxy(isCheckboxEnabled(form.searchFileProxy));
+        fessConfig.setUseBrowserLocaleForSearch(isCheckboxEnabled(form.searchUseBrowserLocale));
+        fessConfig.setSsoType(form.ssoType);
+        fessConfig.setAppValue(form.appValue);
+        fessConfig.setDefaultLabelValue(form.defaultLabelValue);
+        fessConfig.setDefaultSortValue(form.defaultSortValue);
+        fessConfig.setVirtualHostValue(form.virtualHostValue);
+        fessConfig.setAppendQueryParameter(isCheckboxEnabled(form.appendQueryParameter));
+        fessConfig.setIgnoreFailureType(form.ignoreFailureType != null ? form.ignoreFailureType : StringUtil.EMPTY);
+        fessConfig.setFailureCountThreshold(form.failureCountThreshold);
+        fessConfig.setWebApiPopularWord(isCheckboxEnabled(form.popularWord));
+        fessConfig.setCsvFileEncoding(form.csvFileEncoding);
+        fessConfig.setPurgeSearchLogDay(form.purgeSearchLogDay);
+        fessConfig.setPurgeJobLogDay(form.purgeJobLogDay);
+        fessConfig.setPurgeUserInfoDay(form.purgeUserInfoDay);
+        fessConfig.setPurgeByBots(form.purgeByBots != null ? form.purgeByBots : StringUtil.EMPTY);
+        fessConfig.setNotificationTo(form.notificationTo);
+        fessConfig.setSuggestSearchLog(isCheckboxEnabled(form.suggestSearchLog));
+        fessConfig.setSuggestDocuments(isCheckboxEnabled(form.suggestDocuments));
+        fessConfig.setPurgeSuggestSearchLogDay(form.purgeSuggestSearchLogDay);
+        fessConfig.setLdapProviderUrl(form.ldapProviderUrl);
+        fessConfig.setLdapSecurityPrincipal(form.ldapSecurityPrincipal);
+        fessConfig.setLdapAdminSecurityPrincipal(form.ldapAdminSecurityPrincipal);
+        if (form.ldapAdminSecurityCredentials != null && StringUtil.isNotBlank(form.ldapAdminSecurityCredentials.replace("*", " "))) {
+            fessConfig.setLdapAdminSecurityCredentials(form.ldapAdminSecurityCredentials);
+        }
+        fessConfig.setLdapBaseDn(form.ldapBaseDn);
+        fessConfig.setLdapAccountFilter(form.ldapAccountFilter);
+        fessConfig.setLdapGroupFilter(form.ldapGroupFilter);
+        fessConfig.setLdapMemberofAttribute(form.ldapMemberofAttribute != null ? form.ldapMemberofAttribute : StringUtil.EMPTY);
+        fessConfig.setLdapSecurityAuthentication(
+                form.ldapSecurityAuthentication != null ? form.ldapSecurityAuthentication : StringUtil.EMPTY);
+        fessConfig.setLdapInitialContextFactory(form.ldapInitialContextFactory != null ? form.ldapInitialContextFactory : StringUtil.EMPTY);
+        fessConfig.setNotificationLogin(form.notificationLogin);
+        fessConfig.setNotificationSearchTop(form.notificationSearchTop);
+        fessConfig.setNotificationAdvanceSearch(form.notificationAdvanceSearch);
+        fessConfig.setSlackWebhookUrls(form.slackWebhookUrls);
+        fessConfig.setGoogleChatWebhookUrls(form.googleChatWebhookUrls);
+        fessConfig.setLogNotificationEnabled(isCheckboxEnabled(form.logNotificationEnabled));
+        if (StringUtil.isNotBlank(form.logNotificationLevel)) {
+            fessConfig.setLogNotificationLevel(form.logNotificationLevel);
+        }
+        fessConfig.setStorageEndpoint(form.storageEndpoint);
+        if (form.storageAccessKey != null && StringUtil.isNotBlank(form.storageAccessKey.replace("*", " "))) {
+            fessConfig.setStorageAccessKey(form.storageAccessKey);
+        }
+        if (form.storageSecretKey != null && StringUtil.isNotBlank(form.storageSecretKey.replace("*", " "))) {
+            fessConfig.setStorageSecretKey(form.storageSecretKey);
+        }
+        fessConfig.setStorageBucket(form.storageBucket);
+        fessConfig.setStorageType(form.storageType);
+        fessConfig.setStorageRegion(form.storageRegion);
+        fessConfig.setStorageProjectId(form.storageProjectId);
+        fessConfig.setStorageCredentialsPath(form.storageCredentialsPath);
+        if (form.ragLlmName != null && isValidRagLlmName(form.ragLlmName)) {
+            fessConfig.setRagLlmName(form.ragLlmName);
+        }
+
+        // OpenID Connect
+        if (form.oicClientId != null && StringUtil.isNotBlank(form.oicClientId.replace("*", " "))) {
+            fessConfig.setSystemProperty("oic.client.id", form.oicClientId);
+        }
+        if (form.oicClientSecret != null && StringUtil.isNotBlank(form.oicClientSecret.replace("*", " "))) {
+            fessConfig.setSystemProperty("oic.client.secret", form.oicClientSecret);
+        }
+        fessConfig.setSystemProperty("oic.auth.server.url", form.oicAuthServerUrl);
+        fessConfig.setSystemProperty("oic.token.server.url", form.oicTokenServerUrl);
+        fessConfig.setSystemProperty("oic.redirect.url", form.oicRedirectUrl);
+        fessConfig.setSystemProperty("oic.scope", form.oicScope);
+        fessConfig.setSystemProperty("oic.base.url", form.oicBaseUrl);
+        fessConfig.setSystemProperty("oic.default.groups", form.oicDefaultGroups);
+        fessConfig.setSystemProperty("oic.default.roles", form.oicDefaultRoles);
+
+        // SAML
+        fessConfig.setSystemProperty("saml.idp.entityid", form.samlIdpEntityid);
+        fessConfig.setSystemProperty("saml.idp.single_sign_on_service.url", form.samlIdpSingleSignOnServiceUrl);
+        fessConfig.setSystemProperty("saml.idp.single_logout_service.url", form.samlIdpSingleLogoutServiceUrl);
+        fessConfig.setSystemProperty("saml.idp.x509cert", form.samlIdpX509cert);
+        fessConfig.setSystemProperty("saml.sp.base.url", form.samlSpBaseUrl);
+        fessConfig.setSystemProperty("saml.sp.entityid", form.samlSpEntityid);
+        fessConfig.setSystemProperty("saml.sp.assertion_consumer_service.url", form.samlSpAssertionConsumerServiceUrl);
+        fessConfig.setSystemProperty("saml.sp.single_logout_service.url", form.samlSpSingleLogoutServiceUrl);
+        fessConfig.setSystemProperty("saml.sp.nameidformat", form.samlSpNameidformat);
+        fessConfig.setSystemProperty("saml.attribute.group.name", form.samlAttributeGroupName);
+        fessConfig.setSystemProperty("saml.attribute.role.name", form.samlAttributeRoleName);
+        fessConfig.setSystemProperty("saml.default.groups", form.samlDefaultGroups);
+        fessConfig.setSystemProperty("saml.default.roles", form.samlDefaultRoles);
+
+        // SPNEGO
+        fessConfig.setSystemProperty("spnego.krb5.conf", form.spnegoKrb5Conf);
+        fessConfig.setSystemProperty("spnego.login.conf", form.spnegoLoginConf);
+        fessConfig.setSystemProperty("spnego.login.client.module", form.spnegoLoginClientModule);
+        fessConfig.setSystemProperty("spnego.login.server.module", form.spnegoLoginServerModule);
+        fessConfig.setSystemProperty("spnego.preauth.username", form.spnegoPreauthUsername);
+        if (form.spnegoPreauthPassword == null || form.spnegoPreauthPassword.isEmpty()) {
+            // Unlike the other secrets on this screen, an empty pre-authentication password is a
+            // meaningful setting: the SPNEGO library only uses a keytab when both the user name and
+            // the password are empty. Keeping a stored password would leave a keytab configuration
+            // unreachable from here once any password had been saved.
+            fessConfig.setSystemProperty("spnego.preauth.password", null);
+        } else if (StringUtil.isNotBlank(form.spnegoPreauthPassword.replace("*", " "))) {
+            // Anything made only of the mask characters is the placeholder rendered by updateForm,
+            // which means the stored password was left untouched.
+            fessConfig.setSystemProperty("spnego.preauth.password", form.spnegoPreauthPassword);
+        }
+        fessConfig.setSystemProperty("spnego.allow.basic", String.valueOf(isCheckboxEnabled(form.spnegoAllowBasic)));
+        fessConfig.setSystemProperty("spnego.allow.unsecure.basic", String.valueOf(isCheckboxEnabled(form.spnegoAllowUnsecureBasic)));
+        fessConfig.setSystemProperty("spnego.prompt.ntlm", String.valueOf(isCheckboxEnabled(form.spnegoPromptNtlm)));
+        fessConfig.setSystemProperty("spnego.allow.localhost", String.valueOf(isCheckboxEnabled(form.spnegoAllowLocalhost)));
+        fessConfig.setSystemProperty("spnego.allow.delegation", String.valueOf(isCheckboxEnabled(form.spnegoAllowDelegation)));
+        fessConfig.setSystemProperty("spnego.allowed.realms", form.spnegoAllowedRealms);
+        fessConfig.setSystemProperty("spnego.logger.level", form.spnegoLoggerLevel);
+
+        // Entra ID
+        if (form.entraidClientId != null && StringUtil.isNotBlank(form.entraidClientId.replace("*", " "))) {
+            fessConfig.setSystemProperty("entraid.client.id", form.entraidClientId);
+        }
+        if (form.entraidClientSecret != null && StringUtil.isNotBlank(form.entraidClientSecret.replace("*", " "))) {
+            fessConfig.setSystemProperty("entraid.client.secret", form.entraidClientSecret);
+        }
+        fessConfig.setSystemProperty("entraid.tenant", form.entraidTenant);
+        fessConfig.setSystemProperty("entraid.authority", form.entraidAuthority);
+        fessConfig.setSystemProperty("entraid.reply.url", form.entraidReplyUrl);
+        fessConfig.setSystemProperty("entraid.response.mode", form.entraidResponseMode);
+        fessConfig.setSystemProperty("entraid.state.ttl", form.entraidStateTtl);
+        fessConfig.setSystemProperty("entraid.default.groups", form.entraidDefaultGroups);
+        fessConfig.setSystemProperty("entraid.default.roles", form.entraidDefaultRoles);
+        fessConfig.setSystemProperty("entraid.permission.fields", form.entraidPermissionFields);
+        fessConfig.setSystemProperty("entraid.use.ds", String.valueOf(isCheckboxEnabled(form.entraidUseDs)));
+
+        fessConfig.storeSystemProperties();
+        ComponentUtil.getLdapManager().updateConfig();
+        final SystemHelper systemHelper = ComponentUtil.getSystemHelper();
+        systemHelper.refreshDesignJspFiles();
+        systemHelper.updateSystemProperties();
+
+        if (StringUtil.isNotBlank(form.logLevel)) {
+            systemHelper.setLogLevel(form.logLevel);
+        }
+        if (StringUtil.isNotBlank(form.llmLogLevel)) {
+            systemHelper.setLlmLogLevel(form.llmLogLevel);
+        }
+    }
+
+    /**
+     * Updates the form with current configuration values.
+     *
+     * @param fessConfig the current Fess configuration
+     * @param form the form to populate with configuration values
+     */
+    public static void updateForm(final FessConfig fessConfig, final EditForm form) {
+        form.loginRequired = fessConfig.isLoginRequired() ? Constants.TRUE : Constants.FALSE;
+        form.resultCollapsed = fessConfig.isResultCollapsed() ? Constants.TRUE : Constants.FALSE;
+        form.loginLink = fessConfig.isLoginLinkEnabled() ? Constants.TRUE : Constants.FALSE;
+        form.thumbnail = fessConfig.isThumbnailEnabled() ? Constants.TRUE : Constants.FALSE;
+        form.incrementalCrawling = fessConfig.isIncrementalCrawling() ? Constants.TRUE : Constants.FALSE;
+        form.dayForCleanup = fessConfig.getDayForCleanup();
+        form.crawlingThreadCount = fessConfig.getCrawlingThreadCount();
+        form.crawlingUserAgent = fessConfig.getUserAgentName();
+        form.searchLog = fessConfig.isSearchLog() ? Constants.TRUE : Constants.FALSE;
+        form.userInfo = fessConfig.isUserInfo() ? Constants.TRUE : Constants.FALSE;
+        form.userFavorite = fessConfig.isUserFavorite() ? Constants.TRUE : Constants.FALSE;
+        form.webApiJson = fessConfig.isWebApiJson() ? Constants.TRUE : Constants.FALSE;
+        form.searchFileProxy = fessConfig.isSearchFileProxyEnabled() ? Constants.TRUE : Constants.FALSE;
+        form.searchUseBrowserLocale = fessConfig.isBrowserLocaleForSearchUsed() ? Constants.TRUE : Constants.FALSE;
+        form.ssoType = fessConfig.getSsoType();
+        form.appValue = fessConfig.getAppValue();
+        form.defaultLabelValue = fessConfig.getDefaultLabelValue();
+        form.defaultSortValue = fessConfig.getDefaultSortValue();
+        form.virtualHostValue = fessConfig.getVirtualHostValue();
+        form.appendQueryParameter = fessConfig.isAppendQueryParameter() ? Constants.TRUE : Constants.FALSE;
+        form.ignoreFailureType = fessConfig.getIgnoreFailureType();
+        form.failureCountThreshold = fessConfig.getFailureCountThreshold();
+        form.popularWord = fessConfig.isWebApiPopularWord() ? Constants.TRUE : Constants.FALSE;
+        form.csvFileEncoding = fessConfig.getCsvFileEncoding();
+        form.purgeSearchLogDay = fessConfig.getPurgeSearchLogDay();
+        form.purgeJobLogDay = fessConfig.getPurgeJobLogDay();
+        form.purgeUserInfoDay = fessConfig.getPurgeUserInfoDay();
+        form.purgeByBots = fessConfig.getPurgeByBots();
+        form.notificationTo = fessConfig.getNotificationTo();
+        form.suggestSearchLog = fessConfig.isSuggestSearchLog() ? Constants.TRUE : Constants.FALSE;
+        form.suggestDocuments = fessConfig.isSuggestDocuments() ? Constants.TRUE : Constants.FALSE;
+        form.purgeSuggestSearchLogDay = fessConfig.getPurgeSuggestSearchLogDay();
+        form.ldapProviderUrl = fessConfig.getLdapProviderUrl();
+        form.ldapSecurityPrincipal = fessConfig.getLdapSecurityPrincipal();
+        form.ldapAdminSecurityPrincipal = fessConfig.getLdapAdminSecurityPrincipal();
+        form.ldapAdminSecurityCredentials =
+                StringUtil.isNotBlank(fessConfig.getLdapAdminSecurityCredentials()) ? DUMMY_PASSWORD : StringUtil.EMPTY;
+        form.ldapBaseDn = fessConfig.getLdapBaseDn();
+        form.ldapAccountFilter = fessConfig.getLdapAccountFilter();
+        form.ldapGroupFilter = fessConfig.getLdapGroupFilter();
+        form.ldapMemberofAttribute = fessConfig.getLdapMemberofAttribute();
+        form.ldapSecurityAuthentication = fessConfig.getLdapSecurityAuthentication();
+        form.ldapInitialContextFactory = fessConfig.getLdapInitialContextFactory();
+        form.notificationLogin = fessConfig.getNotificationLogin();
+        form.notificationSearchTop = fessConfig.getNotificationSearchTop();
+        form.notificationAdvanceSearch = fessConfig.getNotificationAdvanceSearch();
+        form.slackWebhookUrls = fessConfig.getSlackWebhookUrls();
+        form.googleChatWebhookUrls = fessConfig.getGoogleChatWebhookUrls();
+        form.logNotificationEnabled = fessConfig.isLogNotificationEnabled() ? Constants.TRUE : Constants.FALSE;
+        form.logNotificationLevel = fessConfig.getLogNotificationLevel();
+        form.storageEndpoint = fessConfig.getStorageEndpoint();
+        form.storageAccessKey = StringUtil.isNotBlank(fessConfig.getStorageAccessKey()) ? DUMMY_PASSWORD : StringUtil.EMPTY;
+        form.storageSecretKey = StringUtil.isNotBlank(fessConfig.getStorageSecretKey()) ? DUMMY_PASSWORD : StringUtil.EMPTY;
+        form.storageBucket = fessConfig.getStorageBucket();
+        form.storageType = fessConfig.getStorageType();
+        form.storageRegion = fessConfig.getStorageRegion();
+        form.storageProjectId = fessConfig.getStorageProjectId();
+        form.storageCredentialsPath = fessConfig.getStorageCredentialsPath();
+        form.ragLlmName = fessConfig.getRagLlmName();
+        form.llmLogLevel = ComponentUtil.getSystemHelper().getLlmLogLevel().toUpperCase();
+        form.logLevel = ComponentUtil.getSystemHelper().getLogLevel().toUpperCase();
+
+        // OpenID Connect
+        form.oicClientId = StringUtil.isNotBlank(fessConfig.getSystemProperty("oic.client.id")) ? DUMMY_PASSWORD : StringUtil.EMPTY;
+        form.oicClientSecret = StringUtil.isNotBlank(fessConfig.getSystemProperty("oic.client.secret")) ? DUMMY_PASSWORD : StringUtil.EMPTY;
+        form.oicAuthServerUrl = fessConfig.getSystemProperty("oic.auth.server.url", "https://accounts.google.com/o/oauth2/auth");
+        form.oicTokenServerUrl = fessConfig.getSystemProperty("oic.token.server.url", "https://accounts.google.com/o/oauth2/token");
+        form.oicRedirectUrl = fessConfig.getSystemProperty("oic.redirect.url", StringUtil.EMPTY);
+        form.oicScope = fessConfig.getSystemProperty("oic.scope", StringUtil.EMPTY);
+        form.oicBaseUrl = fessConfig.getSystemProperty("oic.base.url", "http://localhost:8080");
+        form.oicDefaultGroups = fessConfig.getSystemProperty("oic.default.groups", StringUtil.EMPTY);
+        form.oicDefaultRoles = fessConfig.getSystemProperty("oic.default.roles", StringUtil.EMPTY);
+
+        // SAML
+        form.samlIdpEntityid = fessConfig.getSystemProperty("saml.idp.entityid", StringUtil.EMPTY);
+        form.samlIdpSingleSignOnServiceUrl = fessConfig.getSystemProperty("saml.idp.single_sign_on_service.url", StringUtil.EMPTY);
+        form.samlIdpSingleLogoutServiceUrl = fessConfig.getSystemProperty("saml.idp.single_logout_service.url", StringUtil.EMPTY);
+        form.samlIdpX509cert = fessConfig.getSystemProperty("saml.idp.x509cert", StringUtil.EMPTY);
+        form.samlSpBaseUrl = fessConfig.getSystemProperty("saml.sp.base.url", "http://localhost:8080");
+        form.samlSpEntityid = fessConfig.getSystemProperty("saml.sp.entityid", StringUtil.EMPTY);
+        form.samlSpAssertionConsumerServiceUrl = fessConfig.getSystemProperty("saml.sp.assertion_consumer_service.url", StringUtil.EMPTY);
+        form.samlSpSingleLogoutServiceUrl = fessConfig.getSystemProperty("saml.sp.single_logout_service.url", StringUtil.EMPTY);
+        form.samlSpNameidformat = fessConfig.getSystemProperty("saml.sp.nameidformat", StringUtil.EMPTY);
+        form.samlAttributeGroupName = fessConfig.getSystemProperty("saml.attribute.group.name", "memberOf");
+        form.samlAttributeRoleName = fessConfig.getSystemProperty("saml.attribute.role.name", StringUtil.EMPTY);
+        form.samlDefaultGroups = fessConfig.getSystemProperty("saml.default.groups", StringUtil.EMPTY);
+        form.samlDefaultRoles = fessConfig.getSystemProperty("saml.default.roles", StringUtil.EMPTY);
+
+        // SPNEGO
+        form.spnegoKrb5Conf = fessConfig.getSystemProperty("spnego.krb5.conf", "krb5.conf");
+        form.spnegoLoginConf = fessConfig.getSystemProperty("spnego.login.conf", "auth_login.conf");
+        form.spnegoLoginClientModule = fessConfig.getSystemProperty("spnego.login.client.module", "spnego-client");
+        form.spnegoLoginServerModule = fessConfig.getSystemProperty("spnego.login.server.module", "spnego-server");
+        form.spnegoPreauthUsername = fessConfig.getSystemProperty("spnego.preauth.username", StringUtil.EMPTY);
+        form.spnegoPreauthPassword =
+                StringUtil.isNotBlank(fessConfig.getSystemProperty("spnego.preauth.password")) ? DUMMY_PASSWORD : StringUtil.EMPTY;
+        form.spnegoAllowBasic =
+                Constants.TRUE.equalsIgnoreCase(fessConfig.getSystemProperty("spnego.allow.basic", Constants.TRUE)) ? Constants.TRUE
+                        : Constants.FALSE;
+        form.spnegoAllowUnsecureBasic =
+                Constants.TRUE.equalsIgnoreCase(fessConfig.getSystemProperty("spnego.allow.unsecure.basic", Constants.FALSE))
+                        ? Constants.TRUE
+                        : Constants.FALSE;
+        form.spnegoPromptNtlm =
+                Constants.TRUE.equalsIgnoreCase(fessConfig.getSystemProperty("spnego.prompt.ntlm", Constants.TRUE)) ? Constants.TRUE
+                        : Constants.FALSE;
+        form.spnegoAllowLocalhost =
+                Constants.TRUE.equalsIgnoreCase(fessConfig.getSystemProperty("spnego.allow.localhost", Constants.FALSE)) ? Constants.TRUE
+                        : Constants.FALSE;
+        form.spnegoAllowDelegation =
+                Constants.TRUE.equalsIgnoreCase(fessConfig.getSystemProperty("spnego.allow.delegation", Constants.FALSE)) ? Constants.TRUE
+                        : Constants.FALSE;
+        form.spnegoAllowedRealms = fessConfig.getSystemProperty("spnego.allowed.realms", StringUtil.EMPTY);
+        form.spnegoLoggerLevel = fessConfig.getSystemProperty("spnego.logger.level", StringUtil.EMPTY);
+
+        // Entra ID
+        form.entraidClientId =
+                StringUtil.isNotBlank(entraidProperty(fessConfig, "entraid.client.id", "aad.client.id", StringUtil.EMPTY)) ? DUMMY_PASSWORD
+                        : StringUtil.EMPTY;
+        form.entraidClientSecret =
+                StringUtil.isNotBlank(entraidProperty(fessConfig, "entraid.client.secret", "aad.client.secret", StringUtil.EMPTY))
+                        ? DUMMY_PASSWORD
+                        : StringUtil.EMPTY;
+        form.entraidTenant = entraidProperty(fessConfig, "entraid.tenant", "aad.tenant", StringUtil.EMPTY);
+        form.entraidAuthority = entraidProperty(fessConfig, "entraid.authority", "aad.authority", "https://login.microsoftonline.com/");
+        form.entraidReplyUrl = entraidProperty(fessConfig, "entraid.reply.url", "aad.reply.url", StringUtil.EMPTY);
+        form.entraidResponseMode = entraidProperty(fessConfig, "entraid.response.mode", "aad.response.mode", "query");
+        form.entraidStateTtl = entraidProperty(fessConfig, "entraid.state.ttl", "aad.state.ttl", "3600");
+        form.entraidDefaultGroups = entraidProperty(fessConfig, "entraid.default.groups", "aad.default.groups", StringUtil.EMPTY);
+        form.entraidDefaultRoles = entraidProperty(fessConfig, "entraid.default.roles", "aad.default.roles", StringUtil.EMPTY);
+        form.entraidPermissionFields = entraidProperty(fessConfig, "entraid.permission.fields", "aad.permission.fields", "mail");
+        form.entraidUseDs = Constants.TRUE.equalsIgnoreCase(entraidProperty(fessConfig, "entraid.use.ds", "aad.use.ds", Constants.TRUE))
+                ? Constants.TRUE
+                : Constants.FALSE;
+    }
+
+    /**
+     * Resolves an Entra ID setting the way {@code EntraIdAuthenticator} and {@code FessProp} do:
+     * the new {@code entraid.*} key first, then the legacy {@code aad.*} key it replaced, then the
+     * hard-coded default. Only non-blank values count, because a key that is present but empty is
+     * not a configured value.
+     *
+     * <p>updateForm has to follow the same chain the consumers follow. Reading only the new key
+     * renders the hard-coded default on a deployment that is configured through the legacy keys,
+     * and updateConfig then writes that default to the new key -- which every getter prefers --
+     * so opening this screen for an unrelated change and pressing Update would silently move a
+     * sovereign-cloud {@code aad.authority}, a tuned {@code aad.state.ttl}, a non-default
+     * {@code aad.permission.fields} or {@code aad.use.ds=false} back to the shipped default.</p>
+     *
+     * <p>With the legacy value rendered, saving migrates it into the new key instead: the same
+     * setting stays in effect and the screen becomes the migration path the legacy keys never
+     * had. The two masked credential fields go through here as well so a legacy-only deployment
+     * shows them as configured; the mask-only guard in updateConfig then skips the write and
+     * leaves {@code aad.client.id}/{@code aad.client.secret} in place.</p>
+     *
+     * @param fessConfig the current Fess configuration
+     * @param newKey the {@code entraid.*} property key
+     * @param legacyKey the {@code aad.*} property key it replaced
+     * @param defaultValue the value to render when neither key holds one
+     * @return the first non-blank of the new key, the legacy key and the default
+     */
+    private static String entraidProperty(final FessConfig fessConfig, final String newKey, final String legacyKey,
+            final String defaultValue) {
+        final String value = fessConfig.getSystemProperty(newKey);
+        if (StringUtil.isNotBlank(value)) {
+            return value;
+        }
+        final String legacyValue = fessConfig.getSystemProperty(legacyKey);
+        if (StringUtil.isNotBlank(legacyValue)) {
+            return legacyValue;
+        }
+        return defaultValue;
+    }
+
+    private void updateProperty(final String key, final String value) {
+        systemProperties.setProperty(key, value == null ? StringUtil.EMPTY : value);
+    }
+
+    private List<String> getDayItems() {
+        final List<String> items = new ArrayList<>();
+        for (int i = 0; i < 32; i++) {
+            items.add(Integer.toString(i));
+        }
+        for (int i = 40; i < 370; i += 10) {
+            items.add(Integer.toString(i));
+        }
+        items.add(Integer.toString(365));
+        return items;
+    }
+
+    private boolean isRagSectionVisible() {
+        if (!fessConfig.isRagChatEnabled() || !ComponentUtil.hasComponent("llmClientManager")) {
+            return false;
+        }
+        final LlmClientManager llmClientManager = ComponentUtil.getComponent("llmClientManager");
+        return llmClientManager.getClients().length > 0;
+    }
+
+    private List<Map<String, String>> getRagLlmNameItems() {
+        final List<Map<String, String>> itemList = new ArrayList<>();
+        final LlmClientManager llmClientManager = ComponentUtil.getComponent("llmClientManager");
+        for (final LlmClient client : llmClientManager.getClients()) {
+            final Map<String, String> map = new HashMap<>();
+            map.put(Constants.ITEM_LABEL, client.getName());
+            map.put(Constants.ITEM_VALUE, client.getName());
+            itemList.add(map);
+        }
+        return itemList;
+    }
+
+    private static boolean isValidRagLlmName(final String name) {
+        if (!ComponentUtil.getFessConfig().isRagChatEnabled() || !ComponentUtil.hasComponent("llmClientManager")) {
+            return false;
+        }
+        final LlmClientManager llmClientManager = ComponentUtil.getComponent("llmClientManager");
+        for (final LlmClient client : llmClientManager.getClients()) {
+            if (name.equals(client.getName())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Checks whether the submitted SPNEGO settings ask for the NTLM prompt while Basic
+     * authentication is disabled. The SPNEGO library rejects that combination when it builds its
+     * configuration, and it does so lazily on the first login rather than at save time, so both the
+     * admin screen and the API reject it here instead of letting SSO break silently until someone
+     * tries to log in.
+     * <p>
+     * The rule only applies when the settings being stored also select SPNEGO as the SSO provider.
+     * The SPNEGO configuration is built by the SPNEGO authenticator alone, so with any other
+     * {@code sso.type} the stored combination is dormant and cannot break a login. Rejecting it
+     * regardless of the type would pin an error on a SPNEGO checkbox and block every unrelated
+     * change on this screen for installations that never enabled SPNEGO. The gate reads the
+     * submitted type rather than the stored one, so the save that switches {@code sso.type} to
+     * spnego is itself rejected until the combination is fixed: that save is the first one whose
+     * result would be a broken SPNEGO login.
+     *
+     * @param form the form holding the settings to be stored
+     * @return true if the combination must be rejected
+     */
+    public static boolean isSpnegoNtlmPromptUnsupported(final EditForm form) {
+        if (!SSO_TYPE_SPNEGO.equals(form.ssoType)) {
+            return false;
+        }
+        return !isCheckboxEnabled(form.spnegoAllowBasic) && isCheckboxEnabled(form.spnegoPromptNtlm);
+    }
+
+    /**
+     * Checks if a submitted result collapsing value may be written back to the configuration.
+     * For cloud and aws types {@link FessConfig#isResultCollapsed()} forces false instead of
+     * reading the stored property, so no form value derived from it can observe what is stored.
+     * Writing such a value would silently discard the stored setting: the admin form omits the
+     * checkbox and submits nothing, and any API request whose body comes from
+     * {@link #updateForm(FessConfig, EditForm)} carries the forced false. Neither path may be
+     * applied, so the stored value is left untouched for those types.
+     *
+     * @param fessConfig the Fess configuration to check
+     * @return true if the submitted value can be applied
+     */
+    private static boolean isResultCollapsedEditable(final FessConfig fessConfig) {
+        return switch (fessConfig.getFesenType()) {
+        case Constants.FESEN_TYPE_CLOUD, Constants.FESEN_TYPE_AWS -> false;
+        default -> true;
+        };
+    }
+
+}

@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE components PUBLIC "-//DBFLUTE//DTD LastaDi 1.0//EN"
+	"http://dbflute.org/meta/lastadi10.dtd">
+<components>
+	<component name="rankFusionProcessor"
+		class="org.codelibs.fess.rank.fusion.RankFusionProcessor">
+		<postConstruct name="setSearcher">
+			<arg>
+				<component
+					class="org.codelibs.fess.rank.fusion.DefaultSearcher">
+				</component>
+			</arg>
+		</postConstruct>
+	</component>
+	<component name="semanticChunkSearcher"
+		class="org.codelibs.fess.rank.fusion.SemanticChunkSearcher">
+		<postConstruct name="register"></postConstruct>
+	</component>
+	<!-- Registers only when rank.fusion.searchers names "legacy"; see LegacySearcher#register. -->
+	<component name="legacySearcher"
+		class="org.codelibs.fess.rank.fusion.LegacySearcher">
+		<postConstruct name="register"></postConstruct>
+	</component>
+</components>

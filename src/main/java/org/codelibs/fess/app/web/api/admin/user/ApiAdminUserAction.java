@@ -1,0 +1,232 @@
+/*
+ * Copyright 2012-2025 CodeLibs Project and the Others.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND,
+ * either express or implied. See the License for the specific language
+ * governing permissions and limitations under the License.
+ */
+package org.codelibs.fess.app.web.api.admin.user;
+
+import static org.codelibs.fess.app.web.admin.user.AdminUserAction.getUser;
+import static org.codelibs.fess.app.web.admin.user.AdminUserAction.validateAttributes;
+import static org.codelibs.fess.app.web.admin.user.AdminUserAction.verifyPasswordPolicy;
+import static org.codelibs.fess.app.web.admin.user.AdminUserAction.verifyRolesAndGroups;
+
+import java.util.List;
+import java.util.stream.Collectors;
+
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+import org.codelibs.core.lang.StringUtil;
+import org.codelibs.fess.app.pager.UserPager;
+import org.codelibs.fess.app.service.GroupService;
+import org.codelibs.fess.app.service.RoleService;
+import org.codelibs.fess.app.service.UserService;
+import org.codelibs.fess.app.web.CrudMode;
+import org.codelibs.fess.app.web.api.ApiResult;
+import org.codelibs.fess.app.web.admin.user.CreateForm;
+import org.codelibs.fess.app.web.api.admin.FessApiAdminAction;
+import org.codelibs.fess.opensearch.user.exentity.User;
+import org.lastaflute.web.Execute;
+import org.lastaflute.web.response.JsonResponse;
+
+import jakarta.annotation.Resource;
+
+/**
+ * API action for admin user management.
+ */
+public class ApiAdminUserAction extends FessApiAdminAction {
+
+    /** The logger for this class. */
+    private static final Logger logger = LogManager.getLogger(ApiAdminUserAction.class);
+
+    // ===================================================================================
+    //                                                                         Constructor
+    //                                                                         ===========
+    /**
+     * Default constructor.
+     */
+    public ApiAdminUserAction() {
+    }
+
+    // ===================================================================================
+    //                                                                           Attribute
+    //                                                                           =========
+
+    /** The user service for managing user settings. */
+    @Resource
+    private UserService userService;
+
+    /** The role service, used to check that a role id the caller sent exists. */
+    @Resource
+    private RoleService roleService;
+
+    /** The group service, used to check that a group id the caller sent exists. */
+    @Resource
+    private GroupService groupService;
+
+    /**
+     * Retrieves user settings with pagination.
+     *
+     * @param body the search parameters for filtering and pagination
+     * @return JSON response containing user settings list
+     */
+    // GET /api/admin/user/settings
+    // PUT /api/admin/user/settings
+    @Execute
+    public JsonResponse<ApiResult> settings(final SearchBody body) {
+        validateApi(body, messages -> {});
+        final UserPager pager = copyBeanToNewBean(body, UserPager.class);
+        final List<User> list = userService.getUserList(pager);
+        return asJson(
+                new ApiResult.ApiConfigsResponse<EditBody>().settings(list.stream().map(this::createEditBody).collect(Collectors.toList()))
+                        .total(pager.getAllRecordCount())
+                        .status(ApiResult.Status.OK)
+                        .result());
+    }
+
+    /**
+     * Retrieves a specific user setting by ID.
+     *
+     * @param id the ID of the user setting to retrieve
+     * @return JSON response containing the user setting
+     */
+    // GET /api/admin/user/setting/{id}
+    @Execute
+    public JsonResponse<ApiResult> get$setting(final String id) {
+        return asJson(new ApiResult.ApiConfigResponse().setting(userService.getUser(id).map(this::createEditBody).orElseGet(() -> {
+            throwValidationErrorApi(messages -> messages.addErrorsCrudCouldNotFindCrudTable(GLOBAL, id));
+            return null;
+        })).status(ApiResult.Status.OK).result());
+    }
+
+    /**
+     * Creates a new user setting.
+     *
+     * @param body the user data to create
+     * @return JSON response containing the created user setting ID
+     */
+    // POST /api/admin/user/setting
+    @Execute
+    public JsonResponse<ApiResult> post$setting(final CreateBody body) {
+        validateApi(body, messages -> {});
+        verifyRolesAndGroups(body, roleService, groupService, this::throwValidationErrorApi);
+        verifyPassword(body, true);
+        body.crudMode = CrudMode.CREATE;
+        final User entity = getUser(body).orElseGet(() -> {
+            throwValidationErrorApi(messages -> {
+                messages.addErrorsCrudFailedToCreateInstance(GLOBAL);
+            });
+            return null;
+        });
+        try {
+            userService.store(entity);
+            saveInfo(messages -> messages.addSuccessCrudCreateCrudTable(GLOBAL));
+        } catch (final Exception e) {
+            logger.warn("Failed to create user: username={}, error={}", body.name, e.getMessage(), e);
+            throwValidationErrorApi(messages -> messages.addErrorsCrudFailedToCreateCrudTable(GLOBAL, buildThrowableMessage(e)));
+        }
+        return asJson(new ApiResult.ApiUpdateResponse().id(entity.getId()).created(true).status(ApiResult.Status.OK).result());
+    }
+
+    /**
+     * Updates an existing user setting.
+     *
+     * @param body the user data to update
+     * @return JSON response containing the updated user setting ID
+     */
+    // PUT /api/admin/user/setting
+    @Execute
+    public JsonResponse<ApiResult> put$setting(final EditBody body) {
+        validateApi(body, messages -> {});
+        validateAttributes(body.attributes, this::throwValidationErrorApi);
+        verifyRolesAndGroups(body, roleService, groupService, this::throwValidationErrorApi);
+        verifyPassword(body, false);
+        body.crudMode = CrudMode.EDIT;
+        final User entity = getUser(body).orElseGet(() -> {
+            throwValidationErrorApi(messages -> {
+                messages.addErrorsCrudCouldNotFindCrudTable(GLOBAL, body.id);
+            });
+            return null;
+        });
+        try {
+            userService.store(entity);
+        } catch (final Exception e) {
+            logger.warn("Failed to update user: id={}, username={}, error={}", body.id, body.name, e.getMessage(), e);
+            throwValidationErrorApi(messages -> messages.addErrorsCrudFailedToUpdateCrudTable(GLOBAL, buildThrowableMessage(e)));
+        }
+        return asJson(new ApiResult.ApiUpdateResponse().id(entity.getId()).created(false).status(ApiResult.Status.OK).result());
+    }
+
+    /**
+     * Runs the password checks the admin screens run. Without this the API could store a password
+     * the screens refuse, and the account is then usable to log in with it.
+     *
+     * <p>The confirmation field is a typing aid rather than part of the policy, so it is only
+     * compared when the caller sends one; an API client that omits it keeps working.</p>
+     *
+     * @param body the request body carrying the password
+     * @param creating true while creating a user, when a password is mandatory
+     */
+    protected void verifyPassword(final CreateForm body, final boolean creating) {
+        if (creating && StringUtil.isBlank(body.password)) {
+            throwValidationErrorApi(messages -> messages.addErrorsBlankPassword("password"));
+        }
+        if (body.confirmPassword != null && !body.confirmPassword.equals(body.password)) {
+            throwValidationErrorApi(messages -> messages.addErrorsInvalidConfirmPassword("confirmPassword"));
+        }
+        verifyPasswordPolicy(body, this::throwValidationErrorApi);
+    }
+
+    /**
+     * Deletes a user setting by ID.
+     *
+     * @param id the ID of the user setting to delete
+     * @return JSON response indicating success or failure
+     */
+    // DELETE /api/admin/user/setting/{id}
+    @Execute
+    public JsonResponse<ApiResult> delete$setting(final String id) {
+        final User entity = userService.getUser(id).orElseGet(() -> {
+            throwValidationErrorApi(messages -> messages.addErrorsCrudCouldNotFindCrudTable(GLOBAL, id));
+            return null;
+        });
+        getUserBean().ifPresent(u -> {
+            if (u.getFessUser() instanceof User && entity.getName().equals(u.getUserId())) {
+                throwValidationErrorApi(messages -> messages.addErrorsCouldNotDeleteLoggedInUser(GLOBAL));
+            }
+        });
+        try {
+            userService.delete(entity);
+            saveInfo(messages -> messages.addSuccessCrudDeleteCrudTable(GLOBAL));
+        } catch (final Exception e) {
+            logger.warn("Failed to delete user: id={}, username={}, error={}", id, entity.getName(), e.getMessage(), e);
+            throwValidationErrorApi(messages -> messages.addErrorsCrudFailedToDeleteCrudTable(GLOBAL, buildThrowableMessage(e)));
+        }
+        return asJson(new ApiResult.ApiUpdateResponse().id(id).created(false).status(ApiResult.Status.OK).result());
+    }
+
+    /**
+     * Creates an EditBody from a User entity.
+     *
+     * @param entity the user entity to convert
+     * @return the converted EditBody
+     */
+    protected EditBody createEditBody(final User entity) {
+        final EditBody body = new EditBody();
+        copyBeanToBean(entity, body, copyOp -> {
+            copyOp.excludeNull();
+        });
+        body.password = null;
+        body.confirmPassword = null;
+        return body;
+    }
+}

@@ -1,0 +1,47 @@
+#!/bin/sh
+
+# Installs the artifacts Fess needs but does not bundle. Run it once before starting Fess for
+# the first time:
+#
+#     bin/fess-setup install opensearch
+#
+# It also installs Fess plugins and, for the Playwright crawler, Node.js:
+#
+#     bin/fess-setup list plugins
+#     bin/fess-setup install plugin fess-script-groovy
+#     bin/fess-setup install nodejs
+#
+# Run it with no arguments for the full list of commands.
+
+SCRIPT="$0"
+
+# SCRIPT may be an arbitrarily deep series of symlinks. Loop until we have the concrete path.
+while [ -h "$SCRIPT" ] ; do
+    ls=`ls -ld "$SCRIPT"`
+    # Drop everything prior to ->
+    link=`expr "$ls" : '.*-> \(.*\)$'`
+    if expr "$link" : '/.*' > /dev/null; then
+        SCRIPT="$link"
+    else
+        SCRIPT=`dirname "$SCRIPT"`/"$link"
+    fi
+done
+
+# determine fess home
+FESS_HOME=`dirname "$SCRIPT"`/..
+
+# make FESS_HOME absolute
+FESS_HOME=`cd "$FESS_HOME"; pwd`
+
+if [ -x "$JAVA_HOME/bin/java" ]; then
+    JAVA="$JAVA_HOME/bin/java"
+else
+    JAVA=`which java`
+fi
+
+if [ ! -x "$JAVA" ]; then
+    echo "Could not find any executable java binary. Please install java in your PATH or set JAVA_HOME"
+    exit 1
+fi
+
+exec "$JAVA" -Dfess.home="$FESS_HOME" -jar "$FESS_HOME/bin/fess-setup.jar" "$@"

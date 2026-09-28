@@ -1,0 +1,309 @@
+/*
+ * Copyright 2012-2025 CodeLibs Project and the Others.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND,
+ * either express or implied. See the License for the specific language
+ * governing permissions and limitations under the License.
+ */
+package org.codelibs.fess.app.web.sso;
+
+import java.net.URLEncoder;
+import java.util.ArrayList;
+import java.util.List;
+
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+import org.codelibs.fess.Constants;
+import org.codelibs.fess.app.web.RootAction;
+import org.codelibs.fess.app.web.base.FessLoginAction;
+import org.codelibs.fess.app.web.base.login.ActionResponseCredential;
+import org.codelibs.fess.app.web.login.LoginAction;
+import org.codelibs.fess.app.web.search.SearchAction;
+import org.codelibs.fess.entity.RequestParameter;
+import org.codelibs.fess.exception.SsoLoginException;
+import org.codelibs.fess.exception.SsoMessageException;
+import org.codelibs.fess.exception.SsoStateException;
+import org.codelibs.fess.sso.SsoManager;
+import org.codelibs.fess.sso.SsoResponseType;
+import org.codelibs.fess.util.ComponentUtil;
+import org.dbflute.optional.OptionalThing;
+import org.lastaflute.web.Execute;
+import org.lastaflute.web.UrlChain;
+import org.lastaflute.web.login.credential.LoginCredential;
+import org.lastaflute.web.login.exception.LoginFailureException;
+import org.lastaflute.web.response.ActionResponse;
+import org.lastaflute.web.response.HtmlResponse;
+
+import jakarta.servlet.http.HttpServletResponse;
+
+/**
+ * SSO (Single Sign-On) action controller.
+ *
+ * This action handles SSO authentication flows including login, logout, and metadata
+ * operations. It coordinates with the SsoManager to perform authentication using
+ * configured SSO providers and handles various authentication scenarios including
+ * successful login, authentication failures, and redirects.
+ */
+public class SsoAction extends FessLoginAction {
+    // ===================================================================================
+    //                                                                            Constant
+    //
+    private static final Logger logger = LogManager.getLogger(SsoAction.class);
+
+    /**
+     * Constructs a new SSO action.
+     */
+    public SsoAction() {
+        // do nothing
+    }
+
+    // ===================================================================================
+    //                                                                       Login Execute
+    //                                                                      ==============
+
+    /**
+     * Main SSO authentication endpoint.
+     *
+     * This method handles the primary SSO authentication flow. It checks if a user
+     * is already logged in, attempts SSO authentication, and handles various
+     * authentication scenarios including success, failure, and challenge responses.
+     *
+     * @return ActionResponse directing to the appropriate page based on authentication result
+     */
+    @Execute
+    public ActionResponse index() {
+        if (fessLoginAssist.getSavedUserBean().isPresent()) {
+            return redirectToSearchPage().orElseGet(() -> {
+                if (logger.isDebugEnabled()) {
+                    logger.debug("User is already logged in, redirecting to root.");
+                }
+                return redirect(RootAction.class);
+            });
+        }
+        if (searchHelper.hasRequiredSearchParameters()) {
+            // The static theme answers the search pages to everyone and sends the user here itself,
+            // carrying the query it was showing (auth.js promptLogin). Keep it as
+            // FessSearchAction#redirectToLogin did for the JSP pages, so that redirectToSearchPage
+            // lands on it once the login succeeds, and run the login itself on the bare /sso/:
+            // a browser repeats the URL with its Kerberos ticket in the Authorization header, and a
+            // long query plus a large ticket exceeds the container's header limit, which answers
+            // 400 and loses the login rather than the query.
+            searchHelper.storeSearchParameters();
+            return redirect(SsoAction.class);
+        }
+        final SsoManager ssoManager = ComponentUtil.getSsoManager();
+        final LoginCredential loginCredential;
+        try {
+            loginCredential = ssoManager.getLoginCredential();
+        } catch (final SsoLoginException e) {
+            if (ssoManager.available()) {
+                if (e instanceof SsoStateException) {
+                    // The endpoint is anonymous, so a callback that matches no login this server
+                    // started is a rejected request rather than a fault. A stack trace per attempt
+                    // would let an unauthenticated client fill the log.
+                    logger.warn("Failed to process SSO login: {}", e.getMessage());
+                } else {
+                    logger.warn("Failed to process SSO login.", e);
+                }
+                saveError(messages -> messages.addErrorsSsoLoginError(GLOBAL));
+            } else if (logger.isDebugEnabled()) {
+                logger.debug("Failed to process SSO login.", e);
+            }
+            return redirect(LoginAction.class);
+        }
+        if (loginCredential == null) {
+            if (ssoManager.available()) {
+                if (logger.isDebugEnabled()) {
+                    logger.debug("SSO is available but no user found.");
+                }
+                saveError(messages -> messages.addErrorsSsoLoginError(GLOBAL));
+            }
+            if (logger.isDebugEnabled()) {
+                logger.debug("Redirecting to login page.");
+            }
+            return redirect(LoginAction.class);
+        }
+        if (loginCredential instanceof ActionResponseCredential) {
+            if (logger.isDebugEnabled()) {
+                logger.debug("Login credential is an ActionResponseCredential, executing it.");
+            }
+            return ((ActionResponseCredential) loginCredential).execute();
+        }
+        try {
+            return fessLoginAssist.loginRedirect(loginCredential, op -> {}, () -> {
+                if (logger.isDebugEnabled()) {
+                    logger.debug("Logging in user: {}", loginCredential);
+                }
+                activityHelper.login(getUserBean());
+                userInfoHelper.deleteUserCodeFromCookie(request);
+                return redirectToSearchPage().orElseGet(() -> {
+                    if (logger.isDebugEnabled()) {
+                        logger.debug("No search parameters found, redirecting to root.");
+                    }
+                    return getHtmlResponse();
+                });
+            });
+        } catch (final LoginFailureException lfe) {
+            if (ssoManager.available()) {
+                if (logger.isDebugEnabled()) {
+                    logger.debug("SSO is available but login failed.", lfe);
+                }
+                saveError(messages -> messages.addErrorsSsoLoginError(GLOBAL));
+            }
+            if (logger.isDebugEnabled()) {
+                logger.debug("Redirecting to login page after failure.", lfe);
+            }
+            activityHelper.loginFailure(OptionalThing.of(loginCredential));
+            return redirect(LoginAction.class);
+        }
+    }
+
+    /**
+     * SSO metadata endpoint.
+     *
+     * This method handles requests for SSO metadata, typically used by SAML or
+     * other SSO protocols that require metadata exchange. The actual metadata
+     * content is generated by the configured SSO authenticator.
+     *
+     * @return ActionResponse containing the SSO metadata, or an error status
+     */
+    @Execute
+    public ActionResponse metadata() {
+        final SsoManager ssoManager = ComponentUtil.getSsoManager();
+        try {
+            final ActionResponse actionResponse = ssoManager.getResponse(SsoResponseType.METADATA);
+            if (actionResponse == null) {
+                throw responseManager.new400("Unsupported request type.");
+            }
+            return actionResponse;
+        } catch (final SsoMessageException e) {
+            if (e.getCause() == null) {
+                if (logger.isDebugEnabled()) {
+                    logger.debug("Metadata response.", e);
+                }
+                saveInfo(e.getMessageCode());
+                return redirect(LoginAction.class);
+            }
+            logger.warn("Failed to process metadata.", e);
+            // this endpoint is fetched by the IdP or by automation, not by a browser. Redirecting
+            // to the login page would report a misconfigured SP as 200 text/html, so the failure
+            // is signalled with a status instead.
+            return HtmlResponse.asEmptyBody().httpStatus(HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
+        }
+    }
+
+    /**
+     * Attempts to redirect to the search page with preserved search parameters.
+     *
+     * This method checks if there are saved search parameters from a previous
+     * session and redirects the user to the search page with those parameters
+     * restored. This provides a seamless user experience after authentication.
+     *
+     * @return Optional HtmlResponse containing the redirect to search page with parameters,
+     *         or empty if no search parameters were found
+     */
+    /**
+     * Resolves how long a query string {@link #redirectToSearchPage()} may build.
+     *
+     * <p>The bound exists because the container has one: a longer {@code Location} cannot be
+     * written and the login fails with an empty 500. It is configurable because the container's
+     * bound is configurable too -- {@code tomcat.maxHttpHeaderSize} in
+     * {@code tomcat_config.properties}, which the SPNEGO documentation asks deployments with large
+     * Kerberos tickets to raise. Raise the two together.</p>
+     *
+     * <p>The generated accessor answers null for a <em>blank</em> value, and this is read on the
+     * login path, so a blank one falls back to the shipped default rather than throwing.</p>
+     *
+     * @return the maximum encoded query-string length to build
+     */
+    protected int getMaxRestoredQueryLength() {
+        final Integer value = fessConfig.getCookieSearchParameterMaxRestoredLengthAsInteger();
+        return value != null ? value : 4096;
+    }
+
+    protected OptionalThing<HtmlResponse> redirectToSearchPage() {
+        final RequestParameter[] searchParameters = searchHelper.getSearchParameters();
+        if (searchParameters.length > 0) {
+            final List<String> paramList = new ArrayList<>();
+            final int maxLength = getMaxRestoredQueryLength();
+            int length = 0;
+            for (final RequestParameter param : searchParameters) {
+                for (final String value : param.getValues()) {
+                    // The name is encoded for the same reason the value is: both reach this point
+                    // from a client-supplied cookie, and an unencoded '&' or '=' in a name splits
+                    // into query parameters of its own once the redirect URL is assembled.
+                    final String encodedName = URLEncoder.encode(param.getName(), Constants.CHARSET_UTF_8);
+                    final String encoded = URLEncoder.encode(value, Constants.CHARSET_UTF_8);
+                    // Restoring the query is a convenience; the login is not. cookie.search.
+                    // parameter.max.length bounds the COMPRESSED cookie and is therefore no bound
+                    // at all on the URL built from it -- percent-encoding a CJK query multiplies
+                    // its length by nine, so a query well inside query.max.length can produce a
+                    // Location header the container refuses to write, and the login that would
+                    // otherwise have succeeded answers 500 instead. Dropping the restore leaves
+                    // the user logged in on the search top page. The bound is configurable because
+                    // the container bound it protects against is: see tomcat.maxHttpHeaderSize.
+                    length += encodedName.length() + encoded.length() + 2;
+                    if (length > maxLength) {
+                        logger.warn("Stored search parameters exceed {} characters once encoded; " + "logging in without restoring them.",
+                                maxLength);
+                        return OptionalThing.empty();
+                    }
+                    paramList.add(encodedName);
+                    paramList.add(encoded);
+                }
+            }
+            if (logger.isDebugEnabled()) {
+                logger.debug("Redirecting to SearchAction with parameters: {}", paramList);
+            }
+            return OptionalThing.of(redirectWith(SearchAction.class, new UrlChain(this).params(paramList.toArray(n -> new Object[n]))));
+        }
+        return OptionalThing.empty();
+    }
+
+    /**
+     * SSO logout endpoint.
+     *
+     * This method handles SSO logout requests, coordinating with the SSO provider
+     * to properly terminate the user's SSO session. It may involve redirecting
+     * to the SSO provider's logout endpoint or performing local logout operations.
+     *
+     * @return ActionResponse directing to the logout page or SSO provider logout endpoint
+     */
+    @Execute
+    public ActionResponse logout() {
+        final SsoManager ssoManager = ComponentUtil.getSsoManager();
+        try {
+            final ActionResponse actionResponse = ssoManager.getResponse(SsoResponseType.LOGOUT);
+            if (actionResponse == null) {
+                throw responseManager.new400("Unsupported request type.");
+            }
+            return actionResponse;
+        } catch (final SsoMessageException e) {
+            if (e.getCause() == null) {
+                if (logger.isDebugEnabled()) {
+                    logger.debug("Logout response.", e);
+                }
+                saveInfo(e.getMessageCode());
+            } else {
+                if (e.getCause() instanceof SsoStateException) {
+                    // The endpoint is anonymous, so a request that is not a logout callback the IdP
+                    // sent is a rejected request rather than a fault. A stack trace per attempt would
+                    // let an unauthenticated client fill the log.
+                    logger.warn("Failed to process SSO logout: {}", e.getCause().getMessage());
+                } else {
+                    logger.warn("Failed to log out.", e);
+                }
+                saveError(e.getMessageCode());
+            }
+            return redirect(LoginAction.class);
+        }
+    }
+}
